@@ -8,10 +8,12 @@ import com.bdx.texlab.BuildConfig
 import com.bdx.texlab.auth.AuthRepository
 import com.bdx.texlab.auth.friendlyAuthMessage
 import com.bdx.texlab.data.AdminMember
+import com.bdx.texlab.data.AdminRole
 import com.bdx.texlab.data.AdminSendResult
 import com.bdx.texlab.data.AdminTarget
 import com.bdx.texlab.data.AppConfig
 import com.bdx.texlab.data.MembershipLevel
+import com.bdx.texlab.data.MemberStatus
 import com.bdx.texlab.data.MembershipResult
 import com.bdx.texlab.data.ProxyClient
 import com.bdx.texlab.data.ProxyException
@@ -57,7 +59,27 @@ data class AdminUiState(
     val level: MembershipLevel = MembershipLevel.BASIC,
     val sending: Boolean = false,
     val result: AdminSendResult? = null,
+    /** The member whose detail sheet is open, and the values being edited in it. */
+    val openMember: AdminMember? = null,
+    val draftRole: AdminRole? = null,
+    val draftLevel: MembershipLevel? = null,
+    val draftStatus: MemberStatus? = null,
+    val savingMember: Boolean = false,
+    val memberError: String? = null,
 ) {
+    /** What the detail sheet shows: the draft while editing, otherwise the saved row. */
+    val editRole: AdminRole get() = draftRole ?: openMember?.adminRole ?: AdminRole.MEMBER
+    val editLevel: MembershipLevel get() = draftLevel ?: openMember?.level ?: MembershipLevel.BASIC
+    val editStatus: MemberStatus get() = draftStatus ?: openMember?.memberStatus ?: MemberStatus.ACTIVE
+
+    val memberDirty: Boolean
+        get() {
+            val member = openMember ?: return false
+            return editRole != member.adminRole ||
+                editLevel != member.level ||
+                editStatus != member.memberStatus
+        }
+
     val audience: List<AdminMember>
         get() = when (target) {
             AdminTarget.SELECTED -> members.filter { it.email in selected }
@@ -546,6 +568,102 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setAdminLevel(level: MembershipLevel) {
         _state.update { it.copy(admin = it.admin.copy(level = level, error = null)) }
+    }
+
+    /** Opens one member's detail sheet, seeded with the values saved on their row. */
+    fun openAdminMember(memberId: String) {
+        _state.update { state ->
+            val member = state.admin.members.firstOrNull { it.id == memberId }
+                ?: state.admin.members.firstOrNull { it.email == memberId }
+                ?: return@update state
+            state.copy(
+                admin = state.admin.copy(
+                    openMember = member,
+                    draftRole = member.adminRole,
+                    draftLevel = member.level,
+                    draftStatus = member.memberStatus,
+                    savingMember = false,
+                    memberError = null,
+                ),
+            )
+        }
+    }
+
+    fun closeAdminMember() {
+        _state.update { state ->
+            state.copy(
+                admin = state.admin.copy(
+                    openMember = null,
+                    draftRole = null,
+                    draftLevel = null,
+                    draftStatus = null,
+                    savingMember = false,
+                    memberError = null,
+                ),
+            )
+        }
+    }
+
+    fun setAdminDraftRole(role: AdminRole) {
+        _state.update { it.copy(admin = it.admin.copy(draftRole = role, memberError = null)) }
+    }
+
+    fun setAdminDraftLevel(level: MembershipLevel) {
+        _state.update { it.copy(admin = it.admin.copy(draftLevel = level, memberError = null)) }
+    }
+
+    fun setAdminDraftStatus(status: MemberStatus) {
+        _state.update { it.copy(admin = it.admin.copy(draftStatus = status, memberError = null)) }
+    }
+
+    /** Writes only the fields the admin actually changed, then updates the row in place. */
+    fun saveAdminMember() {
+        val current = _state.value
+        val admin = current.admin
+        val member = admin.openMember ?: return
+        if (!current.isAdmin || admin.savingMember || !admin.memberDirty) return
+
+        val role = admin.editRole.takeIf { it != member.adminRole }?.label
+        val level = admin.editLevel.takeIf { it != member.level }?.name?.lowercase()
+        val status = admin.editStatus.takeIf { it != member.memberStatus }?.label
+
+        _state.update { it.copy(admin = it.admin.copy(savingMember = true, memberError = null)) }
+        viewModelScope.launch {
+            runCatching { proxyClient.adminUpdateMember(member.id, role = role, level = level, status = status) }
+                .onSuccess { updated ->
+                    _state.update { state ->
+                        state.copy(
+                            // An admin who raised their own level sees the new allowance right away.
+                            level = if (state.userEmail.equals(updated.email, ignoreCase = true)) {
+                                updated.level
+                            } else {
+                                state.level
+                            },
+                            admin = state.admin.copy(
+                                members = state.admin.members.map { row ->
+                                    if (row.id == updated.id) updated else row
+                                },
+                                openMember = updated,
+                                draftRole = updated.adminRole,
+                                draftLevel = updated.level,
+                                draftStatus = updated.memberStatus,
+                                savingMember = false,
+                                memberError = null,
+                            ),
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    _state.update { state ->
+                        state.copy(
+                            admin = state.admin.copy(
+                                savingMember = false,
+                                memberError = error.message ?: "The member could not be saved.",
+                            ),
+                        )
+                    }
+                }
+        }
     }
 
     fun toggleAdminMember(email: String) {

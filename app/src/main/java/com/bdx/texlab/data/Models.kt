@@ -105,7 +105,40 @@ fun isAdminRole(role: String?): Boolean {
     return clean in ADMIN_ROLES
 }
 
-/** One row in the admin console's member list. */
+/**
+ * Roles an administrator may assign from the console. Mirrors the Worker's assignable roles;
+ * an unknown stored role reads as [MEMBER], which is the least privileged.
+ */
+enum class AdminRole(val label: String) {
+    MEMBER("Member"),
+    MANAGER("Manager"),
+    ADMIN("Admin"),
+    OWNER("Owner"),
+    ;
+
+    companion object {
+        fun from(raw: String?): AdminRole =
+            entries.firstOrNull { it.label.equals(raw?.trim(), ignoreCase = true) } ?: MEMBER
+    }
+}
+
+/** Membership statuses the console may assign. A row without a status is active. */
+enum class MemberStatus(val label: String) {
+    ACTIVE("Active"),
+    PENDING("Pending"),
+    DISABLED("Disabled"),
+    ;
+
+    companion object {
+        fun from(raw: String?): MemberStatus = when (raw?.trim()?.lowercase()) {
+            null, "", "active", "approved", "member", "yes", "true", "1", "paid", "current", "enabled" -> ACTIVE
+            "pending" -> PENDING
+            else -> DISABLED
+        }
+    }
+}
+
+/** One row in the admin console's member list, and the member detail view. */
 data class AdminMember(
     val id: String,
     val email: String,
@@ -114,9 +147,26 @@ data class AdminMember(
     val role: String,
     /** The member has turned notifications on and registered a device. */
     val device: Boolean,
+    val firstName: String = "",
+    val lastName: String = "",
+    /** The raw Members Status column (`Active`, `Pending`, `Revoked`, …); blank means active. */
+    val status: String = "",
+    val photoUrl: String? = null,
+    /** The day this device last registered, when the row records it. */
+    val registeredAt: String = "",
+    val viewsUsed: Int = 0,
+    val viewsLimit: Int = 0,
+    val downloadsUsed: Int = 0,
+    val downloadsLimit: Int = 0,
 ) {
     val isAdmin: Boolean get() = isAdminRole(role)
     val displayName: String get() = name.takeIf { it.isNotBlank() } ?: email.substringBefore('@')
+    val level: MembershipLevel get() = MembershipLevel.from(levelLabel)
+    val adminRole: AdminRole get() = AdminRole.from(role)
+    val memberStatus: MemberStatus get() = MemberStatus.from(status)
+    /** False only when the Status column names something that does not grant access. */
+    val active: Boolean get() = memberStatus == MemberStatus.ACTIVE
+    val statusLabel: String get() = status.takeIf { it.isNotBlank() } ?: MemberStatus.ACTIVE.label
 }
 
 /** Who an admin notification goes to. */

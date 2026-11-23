@@ -163,6 +163,21 @@ const ADMIN_ROLES = new Set(['admin', 'administrator', 'owner', 'manager'].map((
   value.toLowerCase(),
 ));
 
+/** Roles the console may assign, keyed by the lower-case value it sends. */
+const ASSIGNABLE_ROLES = new Map([
+  ['member', 'Member'],
+  ['manager', 'Manager'],
+  ['admin', 'Admin'],
+  ['owner', 'Owner'],
+]);
+
+/** Statuses the console may assign, keyed by the lower-case value it sends. */
+const ASSIGNABLE_STATUSES = new Map([
+  ['active', 'Active'],
+  ['pending', 'Pending'],
+  ['disabled', 'Disabled'],
+]);
+
 /** The UTC calendar day the counters belong to, e.g. "2026-11-22". */
 function todayKey(now = Date.now) {
   return new Date(now()).toISOString().slice(0, 10);
@@ -1118,6 +1133,34 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
   // Admin console: member list, device-token management, notification send
   // ---------------------------------------------------------------------------
 
+  /**
+   * One member as the console sees them. The same shape is returned by the list and by an edit,
+   * so the app can refresh a single row without reloading everything. Null when the row has no
+   * email (such a row cannot sign in, so the console has nothing to show).
+   */
+  function adminMemberRow(record) {
+    const fields = record?.fields || {};
+    const email = firstString(fields, MEMBER_EMAIL_FIELDS);
+    if (!email) return null;
+    const level = normaliseLevel(firstString(fields, LEVEL_FIELDS));
+    return {
+      id: String(record.id || ''),
+      email: email.toLowerCase(),
+      name: firstString(fields, ['Name', 'Full Name', 'Member']) || email.split('@')[0],
+      firstName: firstString(fields, FIRST_NAME_FIELDS) || '',
+      lastName: firstString(fields, LAST_NAME_FIELDS) || '',
+      level,
+      levelLabel: level.charAt(0).toUpperCase() + level.slice(1),
+      role: firstString(fields, ROLE_FIELDS) || 'Member',
+      status: firstString(fields, ['Status', 'Member Status']) || '',
+      photoUrl: firstString(fields, PHOTO_FIELDS) || null,
+      fcmRegistered: fcmRegistered(fields, record),
+      fcmTokenPreview: firstFcmToken(fields, record).slice(0, 8) + '…',
+      fcmRegisteredAt: firstString(fields, ['FCM registered at']),
+      usage: usageSummary(level, readUsage(fields, todayKey(now))),
+    };
+  }
+
   async function adminMembers(request) {
     await requireAdmin(request);
     const members = await airtableList({
@@ -1130,31 +1173,112 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
     });
     const rows = [];
     for (const record of members) {
-      const fields = record.fields || {};
-      const email = firstString(fields, ['Email', 'Member email', 'User email']);
-      if (!email) continue;
-      rows.push({
-        id: String(record.id || ''),
-        email: email.toLowerCase(),
-        name: firstString(fields, ['Name', 'Full Name', 'Member']) || email.split('@')[0],
-        firstName: firstString(fields, FIRST_NAME_FIELDS) || '',
-        lastName: firstString(fields, LAST_NAME_FIELDS) || '',
-        level: normaliseLevel(firstString(fields, LEVEL_FIELDS)),
-        levelLabel: levelLabel(firstString(fields, LEVEL_FIELDS)),
-        role: firstString(fields, ROLE_FIELDS) || 'Member',
-        status: firstString(fields, ['Status', 'Member Status', 'Active']) || '',
-        photoUrl: firstString(fields, PHOTO_FIELDS) || null,
-        fcmRegistered: fcmRegistered(fields, record),
-        fcmTokenPreview: firstFcmToken(fields, record).slice(0, 8) + '…',
-        fcmRegisteredAt: firstString(fields, ['FCM registered at']),
-        usage: readUsage(fields, todayKey(now)),
-      });
+      const row = adminMemberRow(record);
+      if (row) rows.push(row);
     }
     return jsonResponse(200, {
       members: rows,
       total: rows.length,
       note: 'This list is from Airtable, one page at a time. For large bases split the console list by status, level or role.',
     });
+  }
+
+  /**
+   * PATCH /api/admin/members/:id changes one member's Role, Level or Status.
+   *
+   * Only the three fields the console offers are writable; everything else on the row (email,
+   * Google profile, usage counters) is left alone. An admin cannot demote or deactivate their own
+   * row, so the console cannot lock itself out. The membership cache entry for the edited email is
+   * dropped so the change applies to that member's very next request.
+   */
+  async function adminUpdateMember(request, recordId) {
+    const { recordId: adminRecordId } = await requireAdmin(request);
+    if (!/^rec[A-Za-z0-9]{14}$/.test(String(recordId || ''))) {
+      throw new HttpError(400, 'bad_request', 'A valid member record id is required.');
+    }
+
+    const payload = await jsonBody(request);
+    const fields = {};
+
+    let role = '';
+    if (payload?.role !== undefined && payload?.role !== null && String(payload.role).trim() !== '') {
+      const key = String(payload.role).trim().toLowerCase();
+      if (!ASSIGNABLE_ROLES.has(key)) {
+        throw new HttpError(400, 'invalid_role', 'Role must be Member, Manager, Admin or Owner.');
+      }
+      role = ASSIGNABLE_ROLES.get(key);
+    }
+
+    let level = '';
+    if (payload?.level !== undefined && payload?.level !== null && String(payload.level).trim() !== '') {
+      const key = String(payload.level).trim().toLowerCase();
+      if (!LEVELS.includes(key)) {
+        throw new HttpError(400, 'invalid_level', 'Level must be Basic, Pro or Max.');
+      }
+      level = key;
+    }
+
+    let status = '';
+    if (payload?.status !== undefined && payload?.status !== null && String(payload.status).trim() !== '') {
+      const key = String(payload.status).trim().toLowerCase();
+      if (!ASSIGNABLE_STATUSES.has(key)) {
+        throw new HttpError(400, 'invalid_status', 'Status must be Active, Pending or Disabled.');
+      }
+      status = ASSIGNABLE_STATUSES.get(key);
+    }
+
+    if (!role && !level && !status) {
+      throw new HttpError(400, 'invalid_payload', 'Send a role, a level or a status to change.');
+    }
+
+    const existing = await airtableRecord({
+      config,
+      table: config.membersTable,
+      recordId,
+      fetchImpl,
+      throttle: createThrottle(),
+    });
+    const current = existing?.fields || {};
+
+    // Self-protection: an admin editing their own row may raise their level but must keep both
+    // their admin role and an active status, otherwise nobody could reopen the console.
+    if (String(recordId) === String(adminRecordId)) {
+      if (role && !ADMIN_ROLES.has(role.toLowerCase())) {
+        throw new HttpError(
+          400,
+          'cannot_change_own_role',
+          'You cannot remove your own admin role. Ask another admin to change it.',
+        );
+      }
+      if (status && status !== 'Active') {
+        throw new HttpError(
+          400,
+          'cannot_change_own_status',
+          'You cannot deactivate your own membership. Ask another admin to do it.',
+        );
+      }
+    }
+
+    // Write the column the row actually uses (older bases name these differently).
+    const column = (keys) => keys.find((key) => key in current) || keys[0];
+    if (role) fields[column(ROLE_FIELDS)] = role;
+    if (level) fields[column(LEVEL_FIELDS)] = level.charAt(0).toUpperCase() + level.slice(1);
+    if (status) fields[column(['Status', 'Member Status'])] = status;
+
+    await airtableWrite({
+      config,
+      table: config.membersTable,
+      recordId,
+      fields,
+      fetchImpl,
+      throttle: createThrottle(),
+    });
+
+    const email = firstString(current, MEMBER_EMAIL_FIELDS).toLowerCase();
+    if (email) membershipCache.delete(email);
+
+    const row = adminMemberRow({ id: recordId, fields: { ...current, ...fields } });
+    return jsonResponse(200, { ok: true, member: row });
   }
 
   async function adminRegisterTokenForMember(request, recordId) {
@@ -1393,11 +1517,11 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
     if (method === 'OPTIONS') {
       return new Response(null, {
         status: 204,
-        headers: { Allow: 'GET, HEAD, POST, DELETE, OPTIONS', ...corsHeaders(config) },
+        headers: { Allow: 'GET, HEAD, POST, PATCH, DELETE, OPTIONS', ...corsHeaders(config) },
       });
     }
-    if (!['GET', 'HEAD', 'POST', 'DELETE'].includes(method)) {
-      throw new HttpError(405, 'method_not_allowed', 'Only GET, HEAD, POST and DELETE are supported.');
+    if (!['GET', 'HEAD', 'POST', 'PATCH', 'DELETE'].includes(method)) {
+      throw new HttpError(405, 'method_not_allowed', 'Only GET, HEAD, POST, PATCH and DELETE are supported.');
     }
 
     if (url.pathname === '/healthz') {
@@ -1462,6 +1586,12 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
     if (url.pathname === '/api/admin/members') {
       if (method !== 'GET') throw new HttpError(405, 'method_not_allowed', 'Only GET is supported.');
       return adminMembers(request);
+    }
+
+    const adminMemberMatch = /^\/api\/admin\/members\/([^/]+)$/.exec(url.pathname);
+    if (adminMemberMatch) {
+      if (method === 'PATCH') return adminUpdateMember(request, adminMemberMatch[1]);
+      throw new HttpError(405, 'method_not_allowed', 'Use PATCH to change a member\'s role, level or status.');
     }
 
     const adminPushTokenMatch = /^\/api\/admin\/members\/([^/]+)\/push-token$/.exec(url.pathname);

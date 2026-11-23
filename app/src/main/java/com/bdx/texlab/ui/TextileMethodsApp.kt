@@ -18,6 +18,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.bdx.texlab.push.NotificationHistory
 import com.bdx.texlab.ui.screens.AdminConsoleScreen
+import com.bdx.texlab.ui.screens.AdminMemberSheet
 import com.bdx.texlab.ui.screens.HomeScreen
 import com.bdx.texlab.ui.screens.MethodDetailScreen
 import com.bdx.texlab.ui.screens.MethodListScreen
@@ -117,7 +118,27 @@ private fun MemberArea(state: AppUiState, viewModel: AppViewModel) {
                 onTargetChange = viewModel::setAdminTarget,
                 onLevelChange = viewModel::setAdminLevel,
                 onSend = viewModel::sendAdminNotification,
+                onOpenMember = viewModel::openAdminMember,
             )
+
+            // The member detail sheet sits above the console: tap a row to open it.
+            val admin = state.admin
+            admin.openMember?.let { member ->
+                AdminMemberSheet(
+                    member = member,
+                    role = admin.editRole,
+                    level = admin.editLevel,
+                    status = admin.editStatus,
+                    saving = admin.savingMember,
+                    error = admin.memberError,
+                    canSave = admin.memberDirty && !admin.savingMember,
+                    onRoleChange = viewModel::setAdminDraftRole,
+                    onLevelChange = viewModel::setAdminDraftLevel,
+                    onStatusChange = viewModel::setAdminDraftStatus,
+                    onSave = viewModel::saveAdminMember,
+                    onDismiss = viewModel::closeAdminMember,
+                )
+            }
         }
 
         composable("family/{family}") { entry ->

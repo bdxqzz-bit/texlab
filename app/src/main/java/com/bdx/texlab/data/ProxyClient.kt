@@ -4,6 +4,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -74,13 +76,31 @@ private data class PushTokenBody(val token: String, val appId: String)
 private data class AdminMembersResponse(val members: List<AdminMemberDto> = emptyList())
 
 @Serializable
+private data class AdminMemberResponse(val ok: Boolean = false, val member: AdminMemberDto? = null)
+
+@Serializable
 private data class AdminMemberDto(
     val id: String = "",
     val email: String = "",
     val name: String = "",
+    val firstName: String = "",
+    val lastName: String = "",
+    val level: String = "",
     val levelLabel: String = "",
     val role: String = "",
+    val status: String = "",
+    val photoUrl: String? = null,
     val fcmRegistered: Boolean = false,
+    val fcmRegisteredAt: String = "",
+    val usage: AdminUsageDto? = null,
+)
+
+@Serializable
+private data class AdminUsageDto(
+    val viewsLimit: Int = 0,
+    val viewsUsed: Int = 0,
+    val downloadsLimit: Int = 0,
+    val downloadsUsed: Int = 0,
 )
 
 @Serializable
@@ -243,17 +263,34 @@ class ProxyClient(
             json.decodeFromString<AdminMembersResponse>(body)
                 .members
                 .filter { it.email.isNotBlank() }
-                .map { member ->
-                    AdminMember(
-                        id = member.id,
-                        email = member.email,
-                        name = member.name,
-                        levelLabel = member.levelLabel.ifBlank { "Basic" },
-                        role = member.role.ifBlank { "Member" },
-                        device = member.fcmRegistered,
-                    )
-                }
+                .map { it.toAdminMember() }
         }
+    }
+
+    /**
+     * Changes one member's role, membership level or status. Only the fields passed are written;
+     * the Worker rejects unknown values and refuses to demote the signed-in admin's own row.
+     * Returns the member row as the proxy now sees it.
+     */
+    suspend fun adminUpdateMember(
+        recordId: String,
+        role: String? = null,
+        level: String? = null,
+        status: String? = null,
+    ): AdminMember = withContext(Dispatchers.IO) {
+        val payload = buildJsonObject {
+            role?.let { put("role", it) }
+            level?.let { put("level", it) }
+            status?.let { put("status", it) }
+        }
+        val raw = send(
+            path = "/api/admin/members/${recordId.trim()}",
+            body = payload.toString(),
+            method = "PATCH",
+        )
+        val member = json.decodeFromString<AdminMemberResponse>(raw).member
+            ?: throw ProxyException("The member was saved but the server sent no row back.")
+        member.toAdminMember()
     }
 
     /** Sends one notification; [targetMode] is the Worker's own vocabulary. */
@@ -287,9 +324,11 @@ class ProxyClient(
         )
     }
 
-    private suspend fun post(path: String, body: String): String {
+    private suspend fun post(path: String, body: String): String = send(path, body, "POST")
+
+    private suspend fun send(path: String, body: String, method: String): String {
         val request = request(path).newBuilder()
-            .post(body.toRequestBody("application/json; charset=utf-8".toMediaType()))
+            .method(method, body.toRequestBody("application/json; charset=utf-8".toMediaType()))
             .build()
         http.newCall(request).execute().use { response ->
             val text = response.body?.string().orEmpty()
@@ -355,6 +394,24 @@ private fun UsageDto.toQuota(level: String?) = UsageQuota(
     viewsUsed = viewsUsed,
     downloadsLimit = downloadsLimit,
     downloadsUsed = downloadsUsed,
+)
+
+private fun AdminMemberDto.toAdminMember() = AdminMember(
+    id = id,
+    email = email,
+    name = name,
+    levelLabel = levelLabel.ifBlank { level.replaceFirstChar { it.uppercase() }.ifBlank { "Basic" } },
+    role = role.ifBlank { "Member" },
+    device = fcmRegistered,
+    firstName = firstName,
+    lastName = lastName,
+    status = status,
+    photoUrl = photoUrl?.takeIf { it.startsWith("http") },
+    registeredAt = fcmRegisteredAt,
+    viewsUsed = usage?.viewsUsed ?: 0,
+    viewsLimit = usage?.viewsLimit ?: 0,
+    downloadsUsed = usage?.downloadsUsed ?: 0,
+    downloadsLimit = usage?.downloadsLimit ?: 0,
 )
 
 private fun MethodDto.toTestMethod() = TestMethod(

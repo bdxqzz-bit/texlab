@@ -1,5 +1,6 @@
 package com.bdx.texlab.ui.screens
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -15,6 +16,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Campaign
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Button
@@ -66,6 +68,7 @@ fun AdminConsoleScreen(
     onTargetChange: (AdminTarget) -> Unit,
     onLevelChange: (MembershipLevel) -> Unit,
     onSend: () -> Unit,
+    onOpenMember: (String) -> Unit,
 ) {
     if (!state.isAdmin) {
         // Never render the console for a member role, even if the route is somehow reached.
@@ -230,7 +233,8 @@ fun AdminConsoleScreen(
                         )
                         Text(
                             text = "${admin.members.size} members · " +
-                                "${admin.members.count { it.device }} with a device",
+                                "${admin.members.count { it.device }} with a device · " +
+                                "tap a member to change their access",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -258,6 +262,7 @@ fun AdminConsoleScreen(
                     selected = member.email in admin.selected,
                     selectable = admin.target == AdminTarget.SELECTED,
                     onToggle = { onToggleMember(member.email) },
+                    onOpen = { onOpenMember(member.id.ifBlank { member.email }) },
                 )
             }
         }
@@ -336,9 +341,13 @@ private fun MemberRow(
     selected: Boolean,
     selectable: Boolean,
     onToggle: () -> Unit,
+    onOpen: () -> Unit,
 ) {
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onOpen)
+            .padding(vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
@@ -371,14 +380,25 @@ private fun MemberRow(
             )
             Text(
                 text = buildString {
-                    append(if (member.device) "device" else "no device")
-                    if (member.isAdmin) append(" · admin")
+                    append(member.role)
+                    if (member.device) append(" · device")
+                    if (!member.active) append(" · ${member.statusLabel}")
                 },
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = if (member.active) {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                } else {
+                    MaterialTheme.colorScheme.error
+                },
                 maxLines = 1,
             )
         }
+        Icon(
+            imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+            contentDescription = "Open ${member.displayName}",
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(20.dp),
+        )
     }
     HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
 }

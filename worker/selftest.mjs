@@ -652,9 +652,148 @@ await check('a non-admin member is refused the console', async () => {
   assert.equal(body.error, 'not_an_admin');
 });
 
+// ---------------------------------------------------------------------------
+// Admin console: one member's detail, role / membership / status edits
+// ---------------------------------------------------------------------------
+
+const editToken = mintToken({ email: 'stranger@example.com' });
+
+async function memberRow(email) {
+  const { body } = await call('/api/admin/members', { token: adminToken });
+  const row = body.members.find((entry) => entry.email === email);
+  assert.ok(row, `${email} must be in the list`);
+  return row;
+}
+
+await check('the member list carries what the detail view shows', async () => {
+  const row = await memberRow('member@example.com');
+  assert.equal(row.firstName, 'Member');
+  assert.equal(row.lastName, 'One');
+  assert.equal(row.status, 'Active');
+  assert.equal(row.levelLabel, 'Max');
+  assert.equal(row.photoUrl, 'https://lh3.googleusercontent.com/a/member');
+  assert.equal(row.usage.viewsLimit, 50);
+  assert.equal(row.usage.downloadsLimit, 20);
+});
+
+await check('an admin edits a membership level and the member sees it at once', async () => {
+  const row = await memberRow('stranger@example.com');
+  const { status, body } = await call(`/api/admin/members/${row.id}`, {
+    token: adminToken,
+    method: 'PATCH',
+    body: { level: 'pro' },
+  });
+  assert.equal(status, 200, JSON.stringify(body));
+  assert.equal(body.member.level, 'pro');
+  assert.equal(body.member.levelLabel, 'Pro');
+  const write = writes.findLast(
+    (entry) => entry.method === 'PATCH' && entry.recordId === row.id && entry.fields.Level,
+  );
+  assert.ok(write, 'the level must be written to the member row');
+  assert.equal(write.fields.Level, 'Pro');
+  const me = await request('/api/me', editToken);
+  assert.equal(me.body.level, 'pro', 'the edit must not wait for the membership cache');
+});
+
+await check('an admin edits a role and the member gets it on their next request', async () => {
+  const row = await memberRow('stranger@example.com');
+  const { status, body } = await call(`/api/admin/members/${row.id}`, {
+    token: adminToken,
+    method: 'PATCH',
+    body: { role: 'manager' },
+  });
+  assert.equal(status, 200);
+  assert.equal(body.member.role, 'Manager');
+  const me = await request('/api/me', editToken);
+  assert.equal(me.body.role, 'Manager');
+  await call(`/api/admin/members/${row.id}`, { token: adminToken, method: 'PATCH', body: { role: 'member' } });
+});
+
+await check('an unknown role, level or status is refused without writing', async () => {
+  const row = await memberRow('stranger@example.com');
+  const before = writes.length;
+  for (const [field, value, error] of [
+    ['level', 'gold', 'invalid_level'],
+    ['role', 'superuser', 'invalid_role'],
+    ['status', 'gone', 'invalid_status'],
+  ]) {
+    const { status, body } = await call(`/api/admin/members/${row.id}`, {
+      token: adminToken,
+      method: 'PATCH',
+      body: { [field]: value },
+    });
+    assert.equal(status, 400, `${field} must be validated`);
+    assert.equal(body.error, error);
+  }
+  assert.equal(writes.length, before, 'nothing may be written for an invalid edit');
+});
+
+await check('an admin cannot demote or deactivate their own membership', async () => {
+  const row = await memberRow('member@example.com');
+  const demote = await call(`/api/admin/members/${row.id}`, {
+    token: adminToken,
+    method: 'PATCH',
+    body: { role: 'member' },
+  });
+  assert.equal(demote.status, 400);
+  assert.equal(demote.body.error, 'cannot_change_own_role');
+  const deactivate = await call(`/api/admin/members/${row.id}`, {
+    token: adminToken,
+    method: 'PATCH',
+    body: { status: 'disabled' },
+  });
+  assert.equal(deactivate.status, 400);
+  assert.equal(deactivate.body.error, 'cannot_change_own_status');
+});
+
+await check('disabling a member blocks them, and reactivating restores access', async () => {
+  const row = await memberRow('stranger@example.com');
+  const disabled = await call(`/api/admin/members/${row.id}`, {
+    token: adminToken,
+    method: 'PATCH',
+    body: { status: 'disabled' },
+  });
+  assert.equal(disabled.status, 200);
+  assert.equal(disabled.body.member.status, 'Disabled');
+  const blocked = await request('/api/methods', editToken);
+  assert.equal(blocked.status, 403);
+  assert.equal(blocked.body.error, 'not_a_member');
+
+  const restored = await call(`/api/admin/members/${row.id}`, {
+    token: adminToken,
+    method: 'PATCH',
+    body: { status: 'active', level: 'basic' },
+  });
+  assert.equal(restored.status, 200);
+  const allowed = await request('/api/methods', editToken);
+  assert.equal(allowed.status, 200);
+});
+
+await check('a non-admin cannot edit a member, and an unknown row is a 404', async () => {
+  const row = await memberRow('member@example.com');
+  const notAdmin = await call(`/api/admin/members/${row.id}`, {
+    token: mintToken({ email: 'pro@example.com' }),
+    method: 'PATCH',
+    body: { level: 'max' },
+  });
+  assert.equal(notAdmin.status, 403);
+  assert.equal(notAdmin.body.error, 'not_an_admin');
+
+  const missing = await call('/api/admin/members/recAAAAAAAAAAAAAA', {
+    token: adminToken,
+    method: 'PATCH',
+    body: { level: 'max' },
+  });
+  assert.equal(missing.status, 404);
+});
+
 await check('the admin console origin may preflight, and admin responses carry the header', async () => {
   const preflight = await handle(new Request(`${base}/api/admin/members`, { method: 'OPTIONS' }));
   assert.equal(preflight.status, 204);
+  assert.ok(
+    String(preflight.headers.get('allow')).includes('PATCH'),
+    'the console edits members with PATCH',
+  );
   assert.equal(preflight.headers.get('access-control-allow-origin'), '*');
   assert.ok(
     String(preflight.headers.get('access-control-allow-headers')).includes('Authorization'),
