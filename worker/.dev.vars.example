@@ -1,0 +1,9 @@
+# Copy to worker/.dev.vars (git-ignored) for `npm run dev`.
+# In production the token is a Worker secret: npx wrangler secret put AIRTABLE_TOKEN
+AIRTABLE_TOKEN=PASTE_AIRTABLE_PAT
+AIRTABLE_BASE_ID=appbl0HDJ4cbQES5h
+AIRTABLE_METHODS_TABLE=ISO,AATCC
+AIRTABLE_MEMBERS_TABLE=Members
+FIREBASE_PROJECT_ID=android-49288
+# Lower for faster revocation (seconds). Default 300.
+MEMBERSHIP_CACHE_SECONDS=300

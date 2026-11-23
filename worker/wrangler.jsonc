@@ -1,0 +1,23 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "texlab-proxy",
+  "main": "index.mjs",
+  "compatibility_date": "2026-11-01",
+  "observability": { "enabled": true },
+  // Non-secret configuration. AIRTABLE_TOKEN is a secret, never a var:
+  //   npx wrangler secret put AIRTABLE_TOKEN
+  "vars": {
+    "AIRTABLE_BASE_ID": "appbl0HDJ4cbQES5h",
+    "AIRTABLE_METHODS_TABLE": "ISO,AATCC",
+    "AIRTABLE_MEMBERS_TABLE": "Members",
+    "FIREBASE_PROJECT_ID": "android-49288",
+    // In-app updates: what GET /api/app/latest tells installed apps. Publish a new build, then
+    // raise APP_VERSION_CODE and set APP_APK_URL to the signed APK's public https URL. Raise
+    // APP_MIN_SUPPORTED to the new versionCode to force older installs to update.
+    "APP_VERSION_CODE": "2",
+    "APP_VERSION_NAME": "1.1",
+    "APP_MIN_SUPPORTED": "1",
+    "APP_APK_URL": "",
+    "APP_RELEASE_NOTES": ""
+  }
+}

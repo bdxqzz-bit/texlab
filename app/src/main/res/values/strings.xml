@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">TexLab</string>
+
+    <!-- Push notifications sent by the admin console. -->
+    <string name="notification_channel_updates">texlab_updates</string>
+    <string name="notification_channel_updates_name">Lab updates</string>
+    <string name="notification_channel_updates_description">Messages a lab administrator sends from the TexLab console.</string>
+</resources>

@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "754962335107",
+    "project_id": "android-49288",
+    "storage_bucket": "android-49288.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:754962335107:android:a02153650528a97b6162b6",
+        "android_client_info": {
+          "package_name": "com.bdx.texlab"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "754962335107-h78m2e94gb4aa22d2kagv4d9rmgp1egp.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.bdx.texlab",
+            "certificate_hash": "96b9247823280ad7b57de8cbe7e85ea2c1f154ca"
+          }
+        },
+        {
+          "client_id": "754962335107-555qnfh74676cmt38rbt0u1j190cqc0e.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyD6UP7cxyyTlxcW5vLEOO3d1fvcFH57b1M"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "754962335107-555qnfh74676cmt38rbt0u1j190cqc0e.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

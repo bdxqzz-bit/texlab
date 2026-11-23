@@ -1,0 +1,16 @@
+# Copy to local.properties and fill in. local.properties is git-ignored.
+# Gradle also accepts these keys as environment variables.
+
+# ---------- Firebase ----------
+# Firebase needs no key here: app/google-services.json configures the project.
+# Only set this if you want to override the web client id taken from that file.
+# GOOGLE_WEB_CLIENT_ID=PASTE_WEB_CLIENT_ID.apps.googleusercontent.com
+
+# ---------- Method server ----------
+# Base URL of the proxy (worker/ on Cloudflare, or server/ locally). It holds the Airtable
+# token; the app never does. Must be HTTPS unless it is the emulator loopback.
+# From the Android emulator, http://10.0.2.2:8080 reaches the Node server on your computer.
+PROXY_BASE_URL=https://texlab-proxy.bdxqzz.workers.dev
+
+# Shown on the sign-in screen for access requests.
+SUPPORT_EMAIL=labs@example.com

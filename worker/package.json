@@ -1,0 +1,13 @@
+{
+  "name": "texlab-proxy",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node selftest.mjs",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4"
+  }
+}

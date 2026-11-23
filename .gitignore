@@ -1,0 +1,29 @@
+# Android / Gradle
+local.properties
+.gradle/
+build/
+app/build/
+captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aab
+*.iml
+.idea/
+.DS_Store
+
+# Never commit credentials or signing keys. google-services.json is committed on purpose:
+# it is not a secret and the google-services plugin needs it to build.
+*.jks
+*.keystore
+
+# Proxy secrets (Node server and Cloudflare Worker)
+server/.env
+.env
+server/node_modules/
+worker/.dev.vars
+worker/node_modules/
+worker/.wrangler/
+.wrangler/
+.tmp-dev/
+worker/.secrets/
