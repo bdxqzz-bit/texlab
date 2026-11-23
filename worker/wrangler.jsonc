@@ -14,10 +14,10 @@
     // In-app updates: what GET /api/app/latest tells installed apps. Publish a new build, then
     // raise APP_VERSION_CODE and set APP_APK_URL to the signed APK's public https URL. Raise
     // APP_MIN_SUPPORTED to the new versionCode to force older installs to update.
-    "APP_VERSION_CODE": "3",
-    "APP_VERSION_NAME": "1.11",
+    "APP_VERSION_CODE": "4",
+    "APP_VERSION_NAME": "1.12",
     "APP_MIN_SUPPORTED": "1",
-    "APP_APK_URL": "https://github.com/bdxqzz-bit/texlab/releases/download/v1.11/app-release.apk",
-    "APP_RELEASE_NOTES": "Admin console: tap a member to see their details and change role, membership level and status."
+    "APP_APK_URL": "https://github.com/bdxqzz-bit/texlab/releases/download/v1.12/app-release.apk",
+    "APP_RELEASE_NOTES": "Admin console: tap a member to see their details and change role, membership level and status. Zoom controls and 3-dot menu added."
   }
 }

@@ -61,6 +61,7 @@ fun ViewerScreen(
     var progress by remember(method?.id) { mutableStateOf<Float?>(null) }
     var error by remember(method?.id) { mutableStateOf<String?>(null) }
     var attempt by remember(method?.id) { mutableStateOf(0) }
+    var zoomFactor by remember(method?.id) { mutableStateOf(1.0f) }
 
     LaunchedEffect(method?.id, attempt) {
         val target = method ?: return@LaunchedEffect
@@ -157,7 +158,12 @@ fun ViewerScreen(
                     Button(onClick = { attempt++ }) { Text("Retry") }
                 }
 
-                openFile != null -> PdfViewer(file = openFile, modifier = Modifier.fillMaxSize())
+                openFile != null -> PdfViewer(
+                    file = openFile,
+                    modifier = Modifier.fillMaxSize(),
+                    zoomFactor = zoomFactor,
+                    onZoomChange = { zoomFactor = it },
+                )
                 method?.hasPdf != true -> CenteredText("This method has no PDF attached.")
                 else -> Column(
                     modifier = Modifier.fillMaxSize(),

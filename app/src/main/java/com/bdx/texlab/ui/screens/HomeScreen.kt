@@ -19,11 +19,14 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.AdminPanelSettings
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Card
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -70,6 +73,7 @@ fun HomeScreen(
     onSignOut: () -> Unit,
 ) {
     var showDetails by remember { mutableStateOf(false) }
+    var menuExpanded by remember { mutableStateOf(false) }
 
     if (showDetails) {
         MemberDetailsSheet(
@@ -118,19 +122,7 @@ fun HomeScreen(
                     }
                 },
                 actions = {
-                    // Only an admin role gets the console entry point; members never see it.
-                    if (state.isAdmin) {
-                        IconButton(onClick = onOpenAdmin) {
-                            Icon(Icons.Filled.AdminPanelSettings, contentDescription = "Admin console")
-                        }
-                    }
-                    IconButton(onClick = onRefresh) {
-                        Icon(Icons.Filled.Refresh, contentDescription = "Refresh methods")
-                    }
-                    IconButton(onClick = onSignOut) {
-                        Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = "Sign out")
-                    }
-                    // Notification history: the corner bell, with a badge for messages not yet read.
+                    // Notification history stays visible; everything else lives in the corner menu.
                     IconButton(onClick = onOpenNotifications) {
                         BadgedBox(
                             badge = {
@@ -144,6 +136,49 @@ fun HomeScreen(
                             },
                         ) {
                             Icon(Icons.Filled.Notifications, contentDescription = "Notification history")
+                        }
+                    }
+                    Box {
+                        IconButton(onClick = { menuExpanded = true }) {
+                            Icon(Icons.Filled.MoreVert, contentDescription = "More options")
+                        }
+                        DropdownMenu(
+                            expanded = menuExpanded,
+                            onDismissRequest = { menuExpanded = false },
+                        ) {
+                            // Only an admin role gets the console entry point; members never see it.
+                            if (state.isAdmin) {
+                                DropdownMenuItem(
+                                    text = { Text("Admin console") },
+                                    leadingIcon = {
+                                        Icon(Icons.Filled.AdminPanelSettings, contentDescription = null)
+                                    },
+                                    onClick = {
+                                        menuExpanded = false
+                                        onOpenAdmin()
+                                    },
+                                )
+                            }
+                            DropdownMenuItem(
+                                text = { Text("Refresh methods") },
+                                leadingIcon = {
+                                    Icon(Icons.Filled.Refresh, contentDescription = null)
+                                },
+                                onClick = {
+                                    menuExpanded = false
+                                    onRefresh()
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Sign out") },
+                                leadingIcon = {
+                                    Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = null)
+                                },
+                                onClick = {
+                                    menuExpanded = false
+                                    onSignOut()
+                                },
+                            )
                         }
                     }
                 },
