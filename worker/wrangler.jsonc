@@ -10,14 +10,15 @@
     "AIRTABLE_BASE_ID": "appbl0HDJ4cbQES5h",
     "AIRTABLE_METHODS_TABLE": "ISO,AATCC",
     "AIRTABLE_MEMBERS_TABLE": "Members",
+    "MESSAGES_TABLE": "Messages",
     "FIREBASE_PROJECT_ID": "android-49288",
     // In-app updates: what GET /api/app/latest tells installed apps. Publish a new build, then
     // raise APP_VERSION_CODE and set APP_APK_URL to the signed APK's public https URL. Raise
     // APP_MIN_SUPPORTED to the new versionCode to force older installs to update.
-    "APP_VERSION_CODE": "4",
-    "APP_VERSION_NAME": "1.12",
+    "APP_VERSION_CODE": "5",
+    "APP_VERSION_NAME": "1.13",
     "APP_MIN_SUPPORTED": "1",
-    "APP_APK_URL": "https://github.com/bdxqzz-bit/texlab/releases/download/v1.12/app-release.apk",
-    "APP_RELEASE_NOTES": "Admin console: tap a member to see their details and change role, membership level and status. Zoom controls and 3-dot menu added."
+    "APP_APK_URL": "https://github.com/bdxqzz-bit/texlab/releases/download/v1.13/app-release.apk",
+    "APP_RELEASE_NOTES": "Report or request now reaches the lab from inside the app, and admins read member messages in the admin console. About screen added to the 3-dot menu."
   }
 }

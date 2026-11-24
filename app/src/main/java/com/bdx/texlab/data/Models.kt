@@ -169,6 +169,27 @@ data class AdminMember(
     val statusLabel: String get() = status.takeIf { it.isNotBlank() } ?: MemberStatus.ACTIVE.label
 }
 
+/** One report or request a member sent from inside the app; the admin console lists these. */
+data class MemberMessage(
+    val id: String,
+    val email: String,
+    val name: String,
+    val kind: String,
+    val subject: String,
+    val message: String,
+    val appVersion: String = "",
+    val device: String = "",
+    val status: String = "",
+    /** ISO timestamp from the Messages row, e.g. `2026-11-24T09:15:00.000Z`. */
+    val createdAt: String = "",
+) {
+    val isRequest: Boolean get() = kind.equals("Request", ignoreCase = true)
+    val kindLabel: String get() = kind.trim().ifBlank { "Report" }
+    val displayName: String get() = name.takeIf { it.isNotBlank() } ?: email.substringBefore('@')
+    val headline: String get() = subject.takeIf { it.isNotBlank() } ?: kindLabel
+    val dateLabel: String get() = createdAt.take(10)
+}
+
 /** Who an admin notification goes to. */
 enum class AdminTarget(val label: String) {
     SELECTED("Selected"),

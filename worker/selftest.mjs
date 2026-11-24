@@ -70,6 +70,9 @@ const PDF_BYTES = Buffer.from('%PDF-1.4\n% worker selftest\n');
 
 /** email -> { id, fields } — the fake Members table. */
 const members = new Map();
+/** Messages table: record id -> { id, fields, createdTime }. */
+const messages = new Map();
+let nextMessage = 1;
 const writes = [];
 let nextRecord = 1;
 
@@ -114,6 +117,23 @@ const stub = http.createServer((req, res) => {
 
   const table = parts[2];
   const recordId = parts[3];
+
+  if (table === 'Messages') {
+    if (req.method === 'POST') {
+      let raw = '';
+      req.on('data', (chunk) => (raw += chunk));
+      return req.on('end', () => {
+        const fields = JSON.parse(raw || '{}').fields || {};
+        const id = `recMSG${String(nextMessage).padStart(11, '0')}`;
+        nextMessage += 1;
+        const record = { id, fields, createdTime: new Date().toISOString() };
+        messages.set(id, record);
+        writes.push({ method: 'POST', table, fields });
+        return send(200, record);
+      });
+    }
+    return send(200, { records: [...messages.values()] });
+  }
 
   if (table === 'Members') {
     if (req.method === 'GET' && recordId) {
@@ -643,6 +663,65 @@ await check('the admin console lists members with their push state', async () =>
   assert.equal(row.fcmRegistered, true);
   assert.equal(row.role, 'Admin');
   assert.ok(!JSON.stringify(body).includes(DEVICE_TOKEN), 'no device token may appear in the list');
+});
+
+await check('a member sends an in-app report that lands in the Messages table', async () => {
+  const token = mintToken({ email: 'pro@example.com' });
+  const { status, body } = await call('/api/messages', {
+    token,
+    method: 'POST',
+    body: {
+      kind: 'report',
+      subject: 'PDF will not open',
+      message: 'The viewer shows a blank page on Android 14.',
+      appVersion: '1.12 (4)',
+      device: 'Google Pixel 8 · Android 14',
+    },
+  });
+  assert.equal(status, 200);
+  assert.equal(body.ok, true);
+  const stored = [...messages.values()].at(-1).fields;
+  assert.equal(stored.Email, 'pro@example.com', 'the author comes from the verified token');
+  assert.equal(stored.Kind, 'Report');
+  assert.equal(stored.Subject, 'PDF will not open');
+  assert.equal(stored.Status, 'New');
+  assert.equal(stored['App version'], '1.12 (4)');
+  assert.equal(stored.Device, 'Google Pixel 8 · Android 14');
+});
+
+await check('an empty or unknown message is refused', async () => {
+  const empty = await call('/api/messages', {
+    token: memberToken,
+    method: 'POST',
+    body: { kind: 'request', message: '   ' },
+  });
+  assert.equal(empty.status, 400);
+  assert.equal(empty.body.error, 'invalid_message');
+  const unknown = await call('/api/messages', {
+    token: memberToken,
+    method: 'POST',
+    body: { kind: 'complaint', message: 'Something else entirely.' },
+  });
+  assert.equal(unknown.status, 400);
+  assert.equal(unknown.body.error, 'invalid_kind');
+});
+
+await check('the admin console lists member messages newest first', async () => {
+  const { status, body } = await call('/api/admin/messages', { token: adminToken });
+  assert.equal(status, 200);
+  assert.equal(body.messages.length, 1);
+  const [message] = body.messages;
+  assert.equal(message.kind, 'Report');
+  assert.equal(message.subject, 'PDF will not open');
+  assert.equal(message.email, 'pro@example.com');
+  assert.equal(message.status, 'New');
+});
+
+await check('a member cannot read the message inbox', async () => {
+  const token = mintToken({ email: 'pro@example.com' });
+  const { status, body } = await call('/api/admin/messages', { token });
+  assert.equal(status, 403);
+  assert.equal(body.error, 'not_an_admin');
 });
 
 await check('a non-admin member is refused the console', async () => {

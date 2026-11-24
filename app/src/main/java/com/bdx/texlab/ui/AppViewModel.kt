@@ -2,6 +2,7 @@ package com.bdx.texlab.ui
 
 import android.app.Activity
 import android.app.Application
+import android.os.Build
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.bdx.texlab.BuildConfig
@@ -12,6 +13,7 @@ import com.bdx.texlab.data.AdminRole
 import com.bdx.texlab.data.AdminSendResult
 import com.bdx.texlab.data.AdminTarget
 import com.bdx.texlab.data.AppConfig
+import com.bdx.texlab.data.MemberMessage
 import com.bdx.texlab.data.MembershipLevel
 import com.bdx.texlab.data.MemberStatus
 import com.bdx.texlab.data.MembershipResult
@@ -66,6 +68,10 @@ data class AdminUiState(
     val draftStatus: MemberStatus? = null,
     val savingMember: Boolean = false,
     val memberError: String? = null,
+    /** Reports and requests members sent from the app, newest first. */
+    val messages: List<MemberMessage> = emptyList(),
+    val messagesLoading: Boolean = false,
+    val messagesError: String? = null,
 ) {
     /** What the detail sheet shows: the draft while editing, otherwise the saved row. */
     val editRole: AdminRole get() = draftRole ?: openMember?.adminRole ?: AdminRole.MEMBER
@@ -552,6 +558,57 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
         }
+    }
+
+    /** Loads the member inbox for an admin; a member role never gets this far. */
+    fun loadAdminMessages() {
+        val current = _state.value
+        if (!current.isAdmin || current.admin.messagesLoading) return
+        _state.update {
+            it.copy(admin = it.admin.copy(messagesLoading = true, messagesError = null))
+        }
+        viewModelScope.launch {
+            runCatching { proxyClient.adminMessages() }
+                .onSuccess { messages ->
+                    _state.update { state ->
+                        state.copy(
+                            admin = state.admin.copy(
+                                messages = messages,
+                                messagesLoading = false,
+                                messagesError = null,
+                            ),
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    _state.update { state ->
+                        state.copy(
+                            admin = state.admin.copy(
+                                messagesLoading = false,
+                                messagesError = error.message ?: "Could not load member messages.",
+                            ),
+                        )
+                    }
+                }
+        }
+    }
+
+    /**
+     * Sends one report or request to the proxy, which stores it for the admin console. Throws on
+     * failure so the screen can show the server's own message.
+     */
+    suspend fun sendMemberMessage(kind: String, subject: String, message: String) {
+        val hardware = "${Build.MANUFACTURER} ${Build.MODEL}".trim()
+        val device = listOf(hardware, "Android ${Build.VERSION.RELEASE}")
+            .filter { it.isNotBlank() }
+            .joinToString(" · ")
+        proxyClient.submitMessage(
+            kind = kind,
+            subject = subject,
+            message = message,
+            appVersion = "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+            device = device,
+        )
     }
 
     fun setAdminTitle(title: String) {

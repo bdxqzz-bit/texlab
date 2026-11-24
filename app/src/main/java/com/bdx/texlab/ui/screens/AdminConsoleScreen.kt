@@ -45,6 +45,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.bdx.texlab.data.AdminMember
 import com.bdx.texlab.data.AdminTarget
+import com.bdx.texlab.data.MemberMessage
 import com.bdx.texlab.data.MembershipLevel
 import com.bdx.texlab.ui.AdminUiState
 import com.bdx.texlab.ui.AppUiState
@@ -218,6 +219,58 @@ fun AdminConsoleScreen(
                 }
             }
 
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                        text = "Member messages",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        text = if (admin.messages.isEmpty()) {
+                            "Reports and requests members send from the app appear here."
+                        } else {
+                            "${admin.messages.size} sent from inside the app · newest first · " +
+                                "reply by email and close the row in Airtable"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    TextButton(onClick = onRefresh) { Text("Reload messages") }
+                }
+            }
+
+            if (admin.messagesLoading) {
+                item { LinearProgressIndicator(modifier = Modifier.fillMaxWidth()) }
+            }
+
+            admin.messagesError?.let { problem ->
+                item {
+                    Text(
+                        text = problem,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+
+            if (admin.messages.isEmpty() && !admin.messagesLoading && admin.messagesError == null) {
+                item {
+                    Text(
+                        text = "No member has sent a report or request yet.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+
+            items(
+                admin.messages,
+                key = { message -> "message-" + message.id.ifBlank { message.email + message.createdAt } },
+            ) { message ->
+                MessageCard(message)
+            }
+
             item { ComposerCard(admin, onTitleChange, onBodyChange, onTargetChange, onLevelChange) }
 
             item {
@@ -265,6 +318,65 @@ fun AdminConsoleScreen(
                     onOpen = { onOpenMember(member.id.ifBlank { member.email }) },
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun MessageCard(message: MemberMessage) {
+    Card(shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(6.dp),
+                    color = if (message.isRequest) {
+                        MaterialTheme.colorScheme.secondaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.tertiaryContainer
+                    },
+                    contentColor = if (message.isRequest) {
+                        MaterialTheme.colorScheme.onSecondaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.onTertiaryContainer
+                    },
+                ) {
+                    Text(
+                        text = message.kindLabel,
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                    )
+                }
+                if (message.dateLabel.isNotBlank()) {
+                    Text(
+                        text = message.dateLabel,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            Text(
+                text = message.headline,
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(text = message.message, style = MaterialTheme.typography.bodyMedium)
+            Text(
+                text = buildString {
+                    append(message.displayName)
+                    if (message.email.isNotBlank()) append(" · ${message.email}")
+                    if (message.appVersion.isNotBlank()) append(" · v${message.appVersion}")
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }

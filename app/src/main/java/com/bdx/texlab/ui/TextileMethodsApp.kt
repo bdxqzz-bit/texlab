@@ -17,8 +17,10 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.bdx.texlab.push.NotificationHistory
+import com.bdx.texlab.ui.screens.AboutScreen
 import com.bdx.texlab.ui.screens.AdminConsoleScreen
 import com.bdx.texlab.ui.screens.AdminMemberSheet
+import com.bdx.texlab.ui.screens.ContactAdminScreen
 import com.bdx.texlab.ui.screens.HomeScreen
 import com.bdx.texlab.ui.screens.MethodDetailScreen
 import com.bdx.texlab.ui.screens.MethodListScreen
@@ -86,9 +88,29 @@ private fun MemberArea(state: AppUiState, viewModel: AppViewModel) {
                 onRefresh = viewModel::loadMethods,
                 onTogglePush = viewModel::setPushEnabled,
                 onOpenAdmin = { navController.navigate("admin") },
+                onOpenContact = { navController.navigate("contact") },
+                onOpenAbout = { navController.navigate("about") },
                 onOpenNotifications = { navController.navigate("notifications") },
                 unseenNotifications = unseenNotifications,
                 onSignOut = viewModel::signOut,
+            )
+        }
+
+        // A member's report or request, stored by the proxy for the admin console.
+        composable("contact") {
+            ContactAdminScreen(
+                memberEmail = state.userEmail,
+                onSend = viewModel::sendMemberMessage,
+                onBack = { navController.popBackStack() },
+            )
+        }
+
+        composable("about") {
+            AboutScreen(
+                memberName = state.memberName,
+                memberEmail = state.userEmail,
+                levelLabel = state.level?.label,
+                onBack = { navController.popBackStack() },
             )
         }
 
@@ -105,11 +127,17 @@ private fun MemberArea(state: AppUiState, viewModel: AppViewModel) {
         // Admin-only: the route is reachable only from the button HomeScreen shows for an admin
         // role, and the screen itself refuses to render for a member.
         composable("admin") {
-            LaunchedEffect(Unit) { viewModel.loadAdminMembers() }
+            LaunchedEffect(Unit) {
+                viewModel.loadAdminMembers()
+                viewModel.loadAdminMessages()
+            }
             AdminConsoleScreen(
                 state = state,
                 onBack = { navController.popBackStack() },
-                onRefresh = viewModel::loadAdminMembers,
+                onRefresh = {
+                    viewModel.loadAdminMembers()
+                    viewModel.loadAdminMessages()
+                },
                 onToggleMember = viewModel::toggleAdminMember,
                 onSelectReachable = viewModel::selectReachableAdminMembers,
                 onClearSelection = viewModel::clearAdminSelection,

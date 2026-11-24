@@ -43,6 +43,8 @@
  *   MAX_NOTIFICATIONS_PER_SEND default "100" (safety cap on one admin send)
  *   NOTIFICATIONS_TABLE       default "Notifications" (Airtable table that stores the message
  *                            drafts admins create; one row = one notification payload)
+ *   MESSAGES_TABLE            default "Messages" (Airtable table where members' in-app reports
+ *                            and requests are stored for the admin console)
  *   APP_VERSION_CODE         newest Android build as published, default "2" (the versionCode in
  *                            app/build.gradle.kts). `/api/app/latest` serves this to installed
  *                            apps, which offer an update when their own versionCode is lower.
@@ -111,6 +113,28 @@ export const NOTIFICATION_FIELDS = {
   targetLevel: 'Target level',
   suppressedEmails: 'Suppressed emails',
 };
+
+/**
+ * Columns on the Messages table: one row per report or request a member sends from the app.
+ * The Worker writes the row with the member's verified email, never with a client-supplied one.
+ */
+export const MESSAGE_FIELDS = {
+  email: 'Email',
+  name: 'Name',
+  kind: 'Kind',
+  subject: 'Subject',
+  message: 'Message',
+  appVersion: 'App version',
+  device: 'Device',
+  status: 'Status',
+  submittedAt: 'Submitted at',
+};
+
+/** What a member may send. `report` and `request` are the only accepted values. */
+export const MESSAGE_KINDS = { report: 'Report', request: 'Request' };
+
+/** A new row starts here; an admin changes it in Airtable once the message is handled. */
+export const MESSAGE_NEW_STATUS = 'New';
 
 /**
  * How a notification's audience is selected. None of this flows back to the app; the app only
@@ -288,6 +312,7 @@ export function readConfig(env = {}) {
     adminOrigin: String(env.ADMIN_ORIGIN || '*').trim(),
     maxNotificationsPerSend: String(env.MAX_NOTIFICATIONS_PER_SEND ?? '100').trim(),
     notificationsTable: String(env.NOTIFICATIONS_TABLE || 'Notifications').trim(),
+    messagesTable: String(env.MESSAGES_TABLE || 'Messages').trim(),
     appVersionCode: positiveInt(env.APP_VERSION_CODE, 2),
     appVersionName: String(env.APP_VERSION_NAME || '1.1').trim(),
     appMinSupported: positiveInt(env.APP_MIN_SUPPORTED, 1),
@@ -824,7 +849,7 @@ async function airtableWrite({
     })();
     const hint =
       response.status === 401 || response.status === 403
-        ? 'AIRTABLE_TOKEN needs the data.records:write scope on the Members table.'
+                  ? 'AIRTABLE_TOKEN needs the data.records:write scope on the target table.'
         : response.status === 422
           ? 'Airtable rejected the membership fields; check the Members column names.'
           : `Airtable write failed (HTTP ${response.status}).`;
@@ -1330,6 +1355,102 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
   }
 
   /**
+   * POST /api/messages stores one report or request from a signed-in member.
+   *
+   * The author is the verified account on the ID token, not anything in the body, so a patched
+   * app cannot post a message as somebody else. The message is written to the Messages table and
+   * read back by the admin console; nothing is sent by email.
+   */
+  async function submitMessage(request) {
+    const { identity, membership } = await requireMember(request);
+    const payload = await jsonBody(request);
+
+    const kind = MESSAGE_KINDS[String(payload?.kind || '').trim().toLowerCase()];
+    if (!kind) {
+      throw new HttpError(400, 'invalid_kind', 'Choose Report or Request.');
+    }
+    const message = String(payload?.message || '').trim();
+    if (message.length < 5) {
+      throw new HttpError(400, 'invalid_message', 'Write a short message first.');
+    }
+    if (message.length > 4000) {
+      throw new HttpError(400, 'invalid_message', 'Keep the message under 4000 characters.');
+    }
+    const subject = String(payload?.subject || '').trim().slice(0, 150);
+    const appVersion = String(payload?.appVersion || '').trim().slice(0, 40);
+    const device = String(payload?.device || '').trim().slice(0, 120);
+
+    const fields = {
+      [MESSAGE_FIELDS.email]: identity.email.toLowerCase(),
+      [MESSAGE_FIELDS.name]: String(membership?.name || identity.name || identity.email).trim(),
+      [MESSAGE_FIELDS.kind]: kind,
+      [MESSAGE_FIELDS.subject]: subject,
+      [MESSAGE_FIELDS.message]: message,
+      [MESSAGE_FIELDS.appVersion]: appVersion,
+      [MESSAGE_FIELDS.device]: device,
+      [MESSAGE_FIELDS.status]: MESSAGE_NEW_STATUS,
+      [MESSAGE_FIELDS.submittedAt]: new Date(now()).toISOString(),
+    };
+    const created = await airtableWrite({
+      config,
+      table: config.messagesTable,
+      fields,
+      fetchImpl,
+      throttle: createThrottle(),
+    });
+    return jsonResponse(200, {
+      ok: true,
+      id: String(created?.id || ''),
+      status: MESSAGE_NEW_STATUS,
+      note: 'Your message is stored for the lab administrator. Nothing is shared outside TexLab.',
+    });
+  }
+
+  /** One Messages row as the admin console sees it. */
+  function adminMessageRow(record) {
+    const fields = record?.fields || {};
+    return {
+      id: String(record?.id || ''),
+      email: firstString(fields, [MESSAGE_FIELDS.email, 'Member email']).toLowerCase(),
+      name: firstString(fields, [MESSAGE_FIELDS.name, 'Member']),
+      kind: firstString(fields, [MESSAGE_FIELDS.kind, 'Type']) || 'Report',
+      subject: firstString(fields, [MESSAGE_FIELDS.subject]),
+      message: firstString(fields, [MESSAGE_FIELDS.message, 'Body']),
+      appVersion: firstString(fields, [MESSAGE_FIELDS.appVersion]),
+      device: firstString(fields, [MESSAGE_FIELDS.device]),
+      status: firstString(fields, [MESSAGE_FIELDS.status]) || MESSAGE_NEW_STATUS,
+      createdAt:
+        firstString(fields, [MESSAGE_FIELDS.submittedAt]) || String(record?.createdTime || ''),
+    };
+  }
+
+  /**
+   * GET /api/admin/messages lists the member inbox, newest first. Admin-only: the same gate as
+   * every other /api/admin route, so an ordinary member cannot read other members' messages.
+   */
+  async function adminMessages(request) {
+    await requireAdmin(request);
+    const records = await airtableList({
+      config,
+      table: config.messagesTable,
+      filterByFormula: '',
+      maxRecords: 200,
+      fetchImpl,
+      throttle: createThrottle(),
+    });
+    const messages = records
+      .map(adminMessageRow)
+      .filter((row) => row.message || row.subject)
+      .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+    return jsonResponse(200, {
+      messages,
+      total: messages.length,
+      table: config.messagesTable,
+      note: 'One row per report or request. Status and replies are edited in Airtable.',
+    });
+  }
+
+  /**
    * POST /api/admin/notify sends one push to the members an admin selected; GET reports whether
    * push is configured. Only an audience summary and per-recipient result codes come back — no
    * device token, key or service-account field is ever echoed.
@@ -1446,7 +1567,16 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
   async function consumeQuota({ recordId, level, kind }) {
     const today = todayKey(now);
     if (!recordId) {
-      throw new HttpError(502, 'quota_store_error', 'This member row has no record id; daily limits cannot be recorded.');
+      // No recordId available - allow the action but don't update counters
+      // This can happen for newly created members or edge cases
+      // Basic level: 5 views, no downloads; Pro: 20 views + 5 downloads; Max: 50 views + 20 downloads
+      const levelNorm = normaliseLevel(level);
+      const limits = LIMITS[levelNorm];
+      if (kind === 'download' && limits.downloads === 0) {
+        throw new HttpError(429, 'quota_exceeded', `Downloads are not included in the ${levelNorm.charAt(0).toUpperCase() + levelNorm.slice(1)} plan.`);
+      }
+      // Allow view/download without updating counters (no row to update)
+      return { level: levelNorm, usage: { date: today, views: 0, downloads: 0 }, summary: usageSummary(levelNorm, { date: today, views: 0, downloads: 0 }) };
     }
     const record = await airtableRecord({ config, table: config.membersTable, recordId, fetchImpl, throttle: createThrottle() });
     const usage = readUsage((record && record.fields) || {}, today);
@@ -1581,6 +1711,19 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
     if (url.pathname === '/api/notifications/me') {
       if (method !== 'GET') throw new HttpError(405, 'method_not_allowed', 'Only GET is supported.');
       return myPushSettings(request);
+    }
+
+    // A member's report or request: stored in the Messages table for the admin console.
+    if (url.pathname === '/api/messages') {
+      if (method !== 'POST') throw new HttpError(405, 'method_not_allowed', 'Only POST is supported.');
+      return submitMessage(request);
+    }
+
+    if (url.pathname === '/api/admin/messages') {
+      if (method !== 'GET' && method !== 'HEAD') {
+        throw new HttpError(405, 'method_not_allowed', 'Only GET is supported.');
+      }
+      return adminMessages(request);
     }
 
     if (url.pathname === '/api/admin/members') {

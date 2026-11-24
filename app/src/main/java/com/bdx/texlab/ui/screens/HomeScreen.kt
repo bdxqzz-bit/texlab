@@ -19,6 +19,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.AdminPanelSettings
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.Email
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Refresh
@@ -68,6 +70,8 @@ fun HomeScreen(
     onRefresh: () -> Unit,
     onTogglePush: (Boolean) -> Unit,
     onOpenAdmin: () -> Unit,
+    onOpenContact: () -> Unit,
+    onOpenAbout: () -> Unit,
     onOpenNotifications: () -> Unit,
     unseenNotifications: Int,
     onSignOut: () -> Unit,
@@ -159,6 +163,26 @@ fun HomeScreen(
                                     },
                                 )
                             }
+                            DropdownMenuItem(
+                                text = { Text("Report or request") },
+                                leadingIcon = {
+                                    Icon(Icons.Filled.Email, contentDescription = null)
+                                },
+                                onClick = {
+                                    menuExpanded = false
+                                    onOpenContact()
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("About TexLab") },
+                                leadingIcon = {
+                                    Icon(Icons.Filled.Info, contentDescription = null)
+                                },
+                                onClick = {
+                                    menuExpanded = false
+                                    onOpenAbout()
+                                },
+                            )
                             DropdownMenuItem(
                                 text = { Text("Refresh methods") },
                                 leadingIcon = {

@@ -77,7 +77,7 @@ npx wrangler secret put AIRTABLE_TOKEN    # then npx wrangler deploy (your own a
 | --- | --- | --- |
 | `AIRTABLE_TOKEN` | Worker secret | PAT with `data.records:read,data.records:write` and the base added |
 | `AIRTABLE_BASE_ID` | secret, or a var in `wrangler.jsonc` | `appbl0HDJ4cbQES5h` |
-| `AIRTABLE_METHODS_TABLE`, `AIRTABLE_MEMBERS_TABLE`, `FIREBASE_PROJECT_ID`, `MEMBERSHIP_CACHE_SECONDS` | vars | same meanings as the Node server below |
+| `AIRTABLE_METHODS_TABLE`, `AIRTABLE_MEMBERS_TABLE`, `MESSAGES_TABLE`, `FIREBASE_PROJECT_ID`, `MEMBERSHIP_CACHE_SECONDS` | vars | same meanings as the Node server below |
 
 `server/index.mjs` keeps the same endpoints, token checks and member gate for local work
 (`node server/index.mjs`, `node server/selftest.mjs`).
@@ -152,9 +152,11 @@ is `Admin`, `Administrator`, `Owner` or `Manager`):
 
 | Endpoint | Purpose |
 | --- | --- |
+| `POST /api/messages` | `{kind, subject, message, appVersion, device}` — stores one report or request from the signed-in member in the Messages table |
 | `GET /api/notifications/me` | The signed-in member's own push state (token shown as a short preview) |
 | `POST /api/notifications/register` | `{token, appId}` — stores this device on the member's row |
 | `POST /api/notifications/unregister` | Clears the device from the row (switch off / sign out) |
+| `GET /api/admin/messages` | The member inbox: reports and requests sent from the app, newest first |
 | `GET /api/admin/members` | Member list with level, role, status, push state and today's usage |
 | `POST /api/admin/members/{recordId}/push-token`, `DELETE …` | Sets or clears one member's device token |
 | `GET /api/admin/notify` | Whether push is configured on the Worker |
@@ -163,6 +165,14 @@ is `Admin`, `Administrator`, `Owner` or `Manager`):
 `targetMode` is `all members`, `opt-in only`, `admin only` or `level` (with `targetLevel`);
 `suppressedEmails` is a comma-separated list to leave out, which is how the console sends to
 "selected members only". One send is capped by `MAX_NOTIFICATIONS_PER_SEND` (default 100).
+
+**Reports and requests.** The home screen's 3-dot menu opens **Report or request**, a form a
+member fills in (Report a problem / Request, optional subject, message). It is submitted through
+`POST /api/messages`, which writes the row to the `Messages` table with the author taken from the
+verified ID token — no email app is opened and nothing leaves the app's own server. The admin
+console lists those rows under **Member messages**, newest first, with the kind, subject, message,
+member and app/device details. The Worker never writes to a row after creating it, so `Status` is
+edited in Airtable as messages are handled.
 
 **Sending from the app.** The console is built into the app: a member whose `Role` is one of the
 admin roles gets a console icon in the home screen's top bar, and every other role never sees it
@@ -187,6 +197,7 @@ node server/selftest.mjs                # 16 checks: token checks, member gate, 
 | `AIRTABLE_BASE_ID` | required | `app…` id from the base URL, currently `appbl0HDJ4cbQES5h` |
 | `AIRTABLE_METHODS_TABLE` | `ISO,AATCC` | Comma-separated method tables; the table name is the category when a record has no `Category` |
 | `AIRTABLE_MEMBERS_TABLE` | `Members` | Allowlist table |
+| `MESSAGES_TABLE` | `Messages` | Member reports and requests shown in the admin console |
 | `FIREBASE_PROJECT_ID` | `android-49288` | Project whose ID tokens are accepted |
 | `PORT` | `8080` | Listen port (most hosts set this) |
 | `MEMBERSHIP_CACHE_SECONDS` | `300` | How long a member lookup is cached; lower it for faster revocation |
@@ -201,6 +212,13 @@ variable), never in a committed file.
 **Method tables** (`ISO`, `AATCC`) — `Method` (title), `Method Name`, `Scope`, `Version`,
 `File` (attachment). Field names are flexible: `Name`, `Title`, `Description`, `Code`,
 `Standard` and any attachment field are detected too.
+
+**Messages** (`Messages`) — `Email` (single line text, the author from the verified token),
+`Name`, `Kind` (single select `Report`/`Request`), `Subject`, `Message` (long text),
+`App version`, `Device`, `Status` (single select, `New` when written), `Submitted at` (ISO
+timestamp). The Worker creates rows here and reads them for the admin console; it needs
+`data.records:read` and `data.records:write` on this table like the Members table. If the table is
+missing, `POST /api/messages` answers `502 airtable_error` naming the table.
 
 **Members** (`Members`) — `Email` (must match the Google account), `Name`, `First name`,
 `Last name`, `Photo` (url), `Level` (single select `Basic`/`Pro`/`Max`), `Status`, `Role`, and the

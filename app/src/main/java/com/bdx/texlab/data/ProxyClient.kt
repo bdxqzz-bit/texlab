@@ -73,6 +73,32 @@ private data class ErrorResponse(val error: String = "", val message: String? = 
 private data class PushTokenBody(val token: String, val appId: String)
 
 @Serializable
+private data class MessageBody(
+    val kind: String,
+    val subject: String,
+    val message: String,
+    val appVersion: String,
+    val device: String,
+)
+
+@Serializable
+private data class MemberMessagesResponse(val messages: List<MemberMessageDto> = emptyList())
+
+@Serializable
+private data class MemberMessageDto(
+    val id: String = "",
+    val email: String = "",
+    val name: String = "",
+    val kind: String = "",
+    val subject: String = "",
+    val message: String = "",
+    val appVersion: String = "",
+    val device: String = "",
+    val status: String = "",
+    val createdAt: String = "",
+)
+
+@Serializable
 private data class AdminMembersResponse(val members: List<AdminMemberDto> = emptyList())
 
 @Serializable
@@ -253,6 +279,44 @@ class ProxyClient(
     }
 
     /**
+     * Stores one report or request for the lab administrator. The proxy writes it to the Messages
+     * table and ties it to the signed-in member itself, so no email app is involved.
+     */
+    suspend fun submitMessage(
+        kind: String,
+        subject: String,
+        message: String,
+        appVersion: String,
+        device: String,
+    ): Unit = withContext(Dispatchers.IO) {
+        val payload = json.encodeToString(
+            MessageBody.serializer(),
+            MessageBody(
+                kind = kind,
+                subject = subject,
+                message = message,
+                appVersion = appVersion,
+                device = device,
+            ),
+        )
+        post("/api/messages", payload)
+    }
+
+    /**
+     * The member inbox for the admin console. Admin-only on the proxy, newest message first.
+     */
+    suspend fun adminMessages(): List<MemberMessage> = withContext(Dispatchers.IO) {
+        http.newCall(request("/api/admin/messages")).execute().use { response ->
+            val body = response.body?.string().orEmpty()
+            if (!response.isSuccessful) throw ProxyException(describe(response.code, body), response.code)
+            json.decodeFromString<MemberMessagesResponse>(body)
+                .messages
+                .filter { it.message.isNotBlank() || it.subject.isNotBlank() }
+                .map { it.toMemberMessage() }
+        }
+    }
+
+    /**
      * The admin console's member list. The proxy refuses every account whose role is not an admin
      * role, so an ordinary member cannot reach this even with a patched APK.
      */
@@ -394,6 +458,19 @@ private fun UsageDto.toQuota(level: String?) = UsageQuota(
     viewsUsed = viewsUsed,
     downloadsLimit = downloadsLimit,
     downloadsUsed = downloadsUsed,
+)
+
+private fun MemberMessageDto.toMemberMessage() = MemberMessage(
+    id = id,
+    email = email,
+    name = name,
+    kind = kind.ifBlank { "Report" },
+    subject = subject,
+    message = message,
+    appVersion = appVersion,
+    device = device,
+    status = status,
+    createdAt = createdAt,
 )
 
 private fun AdminMemberDto.toAdminMember() = AdminMember(
