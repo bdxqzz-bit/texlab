@@ -11,6 +11,12 @@
     "AIRTABLE_METHODS_TABLE": "ISO,AATCC",
     "AIRTABLE_MEMBERS_TABLE": "Members",
     "MESSAGES_TABLE": "Messages",
+    // "Ask AI" on a method's detail screen: answers are grounded in the method's attached PDF.
+    // The key is a secret, never a var:
+    //   npx wrangler secret put GEMINI_API_KEY
+    "GEMINI_MODEL": "gemini-2.5-flash",
+    // Gemini calls one Worker isolate may start per minute, so the free tier's RPM is not tripped.
+    "GEMINI_RPM": "10",
     "FIREBASE_PROJECT_ID": "android-49288",
     // In-app updates: what GET /api/app/latest tells installed apps. Publish a new build, then
     // raise APP_VERSION_CODE and set APP_APK_URL to the signed APK's public https URL. Raise

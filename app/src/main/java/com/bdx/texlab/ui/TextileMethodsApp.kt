@@ -193,6 +193,10 @@ private fun MemberArea(state: AppUiState, viewModel: AppViewModel) {
                 onBack = { navController.popBackStack() },
                 onView = { navController.navigate("viewer/${Uri.encode(methodId)}") },
                 onDownload = { method?.let(viewModel::download) },
+                chat = state.chat,
+                onAskAi = { method?.let(viewModel::openDocumentChat) },
+                onDismissChat = viewModel::closeDocumentChat,
+                onAskDocument = viewModel::askDocument,
             )
         }
 

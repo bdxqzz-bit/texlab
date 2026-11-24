@@ -101,6 +101,20 @@ data class AdminUiState(
         get() = !sending && audience.isNotEmpty() && (title.isNotBlank() || body.isNotBlank())
 }
 
+/** One visible turn in the document assistant. */
+data class DocumentChatMessage(val fromMember: Boolean, val text: String)
+
+/**
+ * The "Ask AI" conversation for one method. It is opened from the FAB on that method's detail
+ * screen and starts empty every time, so a member never sees another document's answers.
+ */
+data class DocumentChatState(
+    val methodId: String? = null,
+    val messages: List<DocumentChatMessage> = emptyList(),
+    val sending: Boolean = false,
+    val error: String? = null,
+)
+
 /**
  * The launch-time check against the proxy's `/api/app/latest` and the APK download that follows.
  *
@@ -152,6 +166,8 @@ data class AppUiState(
     /** True only for an admin role, so the console entry point is never shown to a member. */
     val isAdmin: Boolean = false,
     val admin: AdminUiState = AdminUiState(),
+    /** The document assistant, when a method's detail screen has it open. */
+    val chat: DocumentChatState = DocumentChatState(),
     /** A newer published build, when the proxy announces one. */
     val update: UpdateUiState = UpdateUiState(),
 ) {
@@ -798,6 +814,64 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
             }
+        }
+    }
+
+    // ------------------------------------------------------------- document assistant
+
+    /** Opens the assistant for one method with a fresh conversation. */
+    fun openDocumentChat(method: TestMethod) {
+        _state.update { it.copy(chat = DocumentChatState(methodId = method.id)) }
+    }
+
+    fun closeDocumentChat() {
+        _state.update { it.copy(chat = DocumentChatState()) }
+    }
+
+    /** Sends one question about the open document and appends the answer as it arrives. */
+    fun askDocument(question: String) {
+        val chat = _state.value.chat
+        val methodId = chat.methodId ?: return
+        val text = question.trim()
+        if (text.isEmpty() || chat.sending) return
+
+        val history = chat.messages
+            .takeLast(8)
+            .map { message -> (if (message.fromMember) "user" else "model") to message.text }
+
+        _state.update {
+            it.copy(
+                chat = it.chat.copy(
+                    messages = it.chat.messages + DocumentChatMessage(fromMember = true, text = text),
+                    sending = true,
+                    error = null,
+                ),
+            )
+        }
+        viewModelScope.launch {
+            runCatching { proxyClient.askDocument(methodId, text, history) }
+                .onSuccess { answer ->
+                    _state.update { state ->
+                        state.copy(
+                            chat = state.chat.copy(
+                                messages = state.chat.messages +
+                                    DocumentChatMessage(fromMember = false, text = answer),
+                                sending = false,
+                                error = null,
+                            ),
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    _state.update { state ->
+                        state.copy(
+                            chat = state.chat.copy(
+                                sending = false,
+                                error = error.message ?: "The assistant could not answer. Try again.",
+                            ),
+                        )
+                    }
+                }
         }
     }
 

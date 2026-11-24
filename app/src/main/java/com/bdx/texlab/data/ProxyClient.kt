@@ -99,6 +99,19 @@ private data class MemberMessageDto(
 )
 
 @Serializable
+private data class ChatTurnDto(val role: String, val text: String)
+
+@Serializable
+private data class AskDocumentBody(
+    val methodId: String,
+    val question: String,
+    val history: List<ChatTurnDto> = emptyList(),
+)
+
+@Serializable
+private data class DocumentAnswerResponse(val answer: String = "")
+
+@Serializable
 private data class AdminMembersResponse(val members: List<AdminMemberDto> = emptyList())
 
 @Serializable
@@ -314,6 +327,29 @@ class ProxyClient(
                 .filter { it.message.isNotBlank() || it.subject.isNotBlank() }
                 .map { it.toMemberMessage() }
         }
+    }
+
+    /**
+     * Asks the document assistant a question about one method. The Worker builds the document
+     * text from the Airtable row and calls Gemini with its own key, so this app never holds an
+     * AI credential; [history] is the visible conversation so far, oldest first, as
+     * (role, text) pairs with role `user` or `model`.
+     */
+    suspend fun askDocument(
+        methodId: String,
+        question: String,
+        history: List<Pair<String, String>> = emptyList(),
+    ): String = withContext(Dispatchers.IO) {
+        val payload = json.encodeToString(
+            AskDocumentBody.serializer(),
+            AskDocumentBody(
+                methodId = methodId,
+                question = question,
+                history = history.map { (role, text) -> ChatTurnDto(role = role, text = text) },
+            ),
+        )
+        val raw = post("/api/documents/ask", payload)
+        json.decodeFromString<DocumentAnswerResponse>(raw).answer.trim()
     }
 
     /**

@@ -17,11 +17,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -44,6 +46,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.bdx.texlab.data.TestMethod
 import com.bdx.texlab.data.UsageQuota
+import com.bdx.texlab.ui.DocumentChatState
 import com.bdx.texlab.ui.DownloadStatus
 
 /**
@@ -61,6 +64,10 @@ fun MethodDetailScreen(
     onBack: () -> Unit,
     onView: () -> Unit,
     onDownload: () -> Unit,
+    chat: DocumentChatState,
+    onAskAi: () -> Unit,
+    onDismissChat: () -> Unit,
+    onAskDocument: (String) -> Unit,
 ) {
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -74,6 +81,17 @@ fun MethodDetailScreen(
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
+        floatingActionButton = {
+            if (method != null) {
+                ExtendedFloatingActionButton(
+                    onClick = onAskAi,
+                    icon = { Icon(Icons.Filled.AutoAwesome, contentDescription = null) },
+                    text = { Text("Ask AI") },
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
+                )
+            }
+        },
         topBar = {
             TopAppBar(
                 navigationIcon = {
@@ -237,8 +255,18 @@ fun MethodDetailScreen(
                 }
             }
 
-            Spacer(Modifier.height(8.dp))
+            // Leaves room for the Ask AI button floating over the end of the page.
+            Spacer(Modifier.height(72.dp))
         }
+    }
+
+    if (method != null && chat.methodId == method.id) {
+        DocumentChatDialog(
+            methodTitle = method.title,
+            chat = chat,
+            onDismiss = onDismissChat,
+            onAsk = onAskDocument,
+        )
     }
 }
 

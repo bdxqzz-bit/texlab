@@ -153,6 +153,7 @@ is `Admin`, `Administrator`, `Owner` or `Manager`):
 | Endpoint | Purpose |
 | --- | --- |
 | `POST /api/messages` | `{kind, subject, message, appVersion, device}` — stores one report or request from the signed-in member in the Messages table |
+| `POST /api/documents/ask` | `{methodId, question, history}` — answers a question about that method with Gemini, grounded in its attached PDF |
 | `GET /api/notifications/me` | The signed-in member's own push state (token shown as a short preview) |
 | `POST /api/notifications/register` | `{token, appId}` — stores this device on the member's row |
 | `POST /api/notifications/unregister` | Clears the device from the row (switch off / sign out) |
@@ -173,6 +174,30 @@ verified ID token — no email app is opened and nothing leaves the app's own se
 console lists those rows under **Member messages**, newest first, with the kind, subject, message,
 member and app/device details. The Worker never writes to a row after creating it, so `Status` is
 edited in Airtable as messages are handled.
+
+**Ask AI on a document.** Every method's detail screen has an **Ask AI** button. It opens a chat
+about that method only: the question goes to `POST /api/documents/ask` with the method's record
+id. The Worker fetches the PDF attached to that row and sends it to Gemini as an inline PDF part,
+so answers are grounded in the document's own text, and adds the row's short text columns (title,
+name, scope, standard, year) as extra context. The file stays in the Worker's memory for ten
+minutes so follow-up questions do not re-download it, and is never sent to the app or stored. The
+app holds no AI credential and the answer is never stored. Without the key the route answers
+`500 gemini_not_configured` and the rest of the app is unaffected.
+
+```bash
+cd worker
+npx wrangler secret put GEMINI_API_KEY     # a Google AI Studio key from https://aistudio.google.com/apikey
+```
+
+`GEMINI_MODEL` (default `gemini-2.5-flash`) picks the model. Only the last eight chat turns are
+replayed to the model, and a question is capped at 1000 characters.
+
+**Ask AI limits.** Each level gets a daily number of questions — Basic 5, Pro 20, Max 40 —
+counted in the `Ask AI today` column on the member row next to the view and download counters,
+reset at 00:00 UTC. A question is reserved before the Gemini call and refunded if the call fails.
+On top of that, the question goes through a per-isolate sliding-minute cap (`GEMINI_RPM`, default
+10) and one in-flight question per member, so the free tier's rate limit is not tripped and the
+key cannot be spammed; a refused call returns `429 assistant_busy` with `Retry-After`.
 
 **Sending from the app.** The console is built into the app: a member whose `Role` is one of the
 admin roles gets a console icon in the home screen's top bar, and every other role never sees it

@@ -74,6 +74,8 @@ const members = new Map();
 const messages = new Map();
 let nextMessage = 1;
 const writes = [];
+/** Every generateContent call the Worker made, so the prompt can be asserted on. */
+const geminiCalls = [];
 let nextRecord = 1;
 
 function seedMember(email, fields) {
@@ -96,6 +98,17 @@ seedMember('member@example.com', {
 seedMember('pro@example.com', { Name: '', Status: 'Active', Level: 'Pro' });
 seedMember('revoked@example.com', { Name: 'Revoked', Status: 'Revoked', Level: 'Basic' });
 seedMember('pending@example.com', { Name: 'Pending', Status: 'Pending', Level: 'Basic' });
+// Used up today's five Basic Ask AI questions, to prove the daily cap is enforced server-side.
+const TODAY = new Date().toISOString().slice(0, 10);
+seedMember('exhausted@example.com', {
+  Name: 'Exhausted',
+  Status: 'Active',
+  Level: 'Basic',
+  'Usage date': TODAY,
+  'Views today': 0,
+  'Downloads today': 0,
+  'Ask AI today': 5,
+});
 
 const stub = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://127.0.0.1');
@@ -111,6 +124,34 @@ const stub = http.createServer((req, res) => {
   if (url.pathname === '/iso-1833-17.pdf') {
     res.writeHead(200, { 'Content-Type': 'application/pdf' });
     return res.end(PDF_BYTES);
+  }
+
+  if (url.pathname.startsWith('/gemini/models/')) {
+    let raw = '';
+    req.on('data', (chunk) => (raw += chunk));
+    return req.on('end', () => {
+      const parsed = JSON.parse(raw || '{}');
+      geminiCalls.push({
+        path: url.pathname,
+        key: req.headers['x-goog-api-key'],
+        body: parsed,
+      });
+      if (JSON.stringify(parsed).includes('FAILME')) {
+        return send(500, { error: { message: 'upstream exploded' } });
+      }
+      return send(200, {
+        candidates: [
+          {
+            content: {
+              parts: [
+                { text: '' },
+                { text: 'ISO 1833-17 covers cellulose fibre mixtures.' },
+              ],
+            },
+          },
+        ],
+      });
+    });
   }
 
   assert.equal(req.headers.authorization, 'Bearer test-airtable-token', 'Airtable token must be sent');
@@ -198,6 +239,10 @@ const env = {
   APP_MIN_SUPPORTED: '2',
   APP_APK_URL: 'https://downloads.example.com/texlab-1.2.apk',
   APP_RELEASE_NOTES: 'Faster PDF viewer.',
+  GEMINI_API_KEY: 'test-gemini-key',
+  GEMINI_MODEL: 'gemini-test',
+  GEMINI_API_BASE: `${origin}/gemini`,
+  GEMINI_RPM: '100',
 };
 
 const handle = createProxy({ env });
@@ -368,6 +413,9 @@ await check('/api/me returns the level and the Google profile', async () => {
       downloadsLimit: 20,
       downloadsUsed: 0,
       downloadsRemaining: 20,
+      asksLimit: 40,
+      asksUsed: 0,
+      asksRemaining: 40,
     },
   });
 });
@@ -722,6 +770,149 @@ await check('a member cannot read the message inbox', async () => {
   const { status, body } = await call('/api/admin/messages', { token });
   assert.equal(status, 403);
   assert.equal(body.error, 'not_an_admin');
+});
+
+await check('a member asks about one document and gets a grounded answer', async () => {
+  const { status, body } = await call('/api/documents/ask', {
+    token: memberToken,
+    method: 'POST',
+    body: {
+      methodId: 'recAAAAAAAAAAAAAA',
+      question: 'What fibre mixtures does this cover?',
+      history: [
+        { role: 'user', text: 'Hello' },
+        { role: 'model', text: 'Ask me about ISO 1833-17.' },
+      ],
+    },
+  });
+  assert.equal(status, 200, JSON.stringify(body));
+  assert.equal(body.answer, 'ISO 1833-17 covers cellulose fibre mixtures.');
+  assert.equal(body.model, 'gemini-test');
+  assert.equal(body.groundedIn, 'pdf', 'the answer must be grounded in the attached PDF');
+  const sent = geminiCalls.at(-1);
+  assert.equal(sent.key, 'test-gemini-key', 'the Worker key must be sent as x-goog-api-key');
+  assert.ok(sent.path.endsWith('/models/gemini-test:generateContent'), sent.path);
+  assert.ok(sent.body.system_instruction.parts[0].text.includes('ISO 1833-17'));
+  assert.ok(sent.body.system_instruction.parts[0].text.includes('Determination of cellulose fibre mixtures.'));
+  assert.ok(sent.body.system_instruction.parts[0].text.includes('full PDF is attached'));
+  assert.deepEqual(
+    sent.body.contents.slice(0, -1).map((entry) => [entry.role, entry.parts[0].text]),
+    [
+      ['user', 'Hello'],
+      ['model', 'Ask me about ISO 1833-17.'],
+    ],
+  );
+  const question = sent.body.contents.at(-1);
+  assert.equal(question.role, 'user');
+  assert.equal(question.parts[0].inline_data.mime_type, 'application/pdf');
+  assert.equal(
+    question.parts[0].inline_data.data,
+    Buffer.from(PDF_BYTES).toString('base64'),
+    'the method PDF must be sent as inline data',
+  );
+  assert.equal(question.parts[1].text, 'What fibre mixtures does this cover?');
+  assert.ok(!JSON.stringify(body).includes('test-gemini-key'), 'the key must never be returned');
+});
+
+await check('the daily Ask AI allowance is charged, then refuses further questions', async () => {
+  const charged = [...members.values()].find((row) => row.fields.Email === 'member@example.com');
+  assert.equal(charged.fields['Ask AI today'], 1, 'one question must be charged to the row');
+  assert.equal(charged.fields['Usage date'], TODAY, 'the counter must belong to today');
+
+  const { status, body } = await call('/api/documents/ask', {
+    token: mintToken({ email: 'exhausted@example.com' }),
+    method: 'POST',
+    body: { methodId: 'recAAAAAAAAAAAAAA', question: 'One more question?' },
+  });
+  assert.equal(status, 429, JSON.stringify(body));
+  assert.equal(body.error, 'quota_exceeded');
+  assert.equal(body.kind, 'ask');
+  assert.equal(body.usage.asksRemaining, 0);
+  assert.ok(body.message.includes('Ask AI'), body.message);
+});
+
+await check('a burst is held below the Gemini per-minute cap', async () => {
+  const burst = createProxy({ env: { ...env, GEMINI_RPM: '1' } });
+  const ask = () =>
+    burst(
+      new Request(`${base}/api/documents/ask`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${memberToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ methodId: 'recAAAAAAAAAAAAAA', question: 'What is this?' }),
+      }),
+    );
+  const first = await ask();
+  assert.equal(first.status, 200, await first.clone().text());
+  const callsBefore = geminiCalls.length;
+  const second = await ask();
+  const limit = await second.json();
+  assert.equal(second.status, 429);
+  assert.equal(limit.error, 'assistant_busy');
+  assert.ok(Number(second.headers.get('retry-after')) > 0, 'a Retry-After must be sent');
+  assert.equal(geminiCalls.length, callsBefore, 'a refused burst must not reach Gemini');
+});
+
+await check('a failed Gemini call gives the reserved question back', async () => {
+  const row = [...members.values()].find((entry) => entry.fields.Email === 'member@example.com');
+  const before = row.fields['Ask AI today'];
+  const { status, body } = await call('/api/documents/ask', {
+    token: memberToken,
+    method: 'POST',
+    body: { methodId: 'recAAAAAAAAAAAAAA', question: 'FAILME please' },
+  });
+  assert.equal(status, 502, JSON.stringify(body));
+  assert.equal(body.error, 'gemini_error');
+  assert.equal(row.fields['Ask AI today'], before, 'a failed answer costs no question');
+});
+
+await check('an empty question or an unknown method is refused', async () => {
+  const empty = await call('/api/documents/ask', {
+    token: memberToken,
+    method: 'POST',
+    body: { methodId: 'recAAAAAAAAAAAAAA', question: '  ' },
+  });
+  assert.equal(empty.status, 400);
+  assert.equal(empty.body.error, 'invalid_question');
+
+  const badId = await call('/api/documents/ask', {
+    token: memberToken,
+    method: 'POST',
+    body: { methodId: '../etc', question: 'What is this?' },
+  });
+  assert.equal(badId.status, 400);
+
+  const get = await call('/api/documents/ask', { token: memberToken });
+  assert.equal(get.status, 405);
+});
+
+await check('the document assistant needs a member token', async () => {
+  const anonymous = await call('/api/documents/ask', {
+    method: 'POST',
+    body: { methodId: 'recAAAAAAAAAAAAAA', question: 'What is this?' },
+  });
+  assert.equal(anonymous.status, 401);
+  const revoked = await call('/api/documents/ask', {
+    token: mintToken({ email: 'revoked@example.com' }),
+    method: 'POST',
+    body: { methodId: 'recAAAAAAAAAAAAAA', question: 'What is this?' },
+  });
+  assert.equal(revoked.status, 403);
+});
+
+await check('without a Gemini key the assistant fails closed and says why', async () => {
+  const { GEMINI_API_KEY, ...withoutKey } = env;
+  const unconfigured = createProxy({ env: withoutKey });
+  const response = await unconfigured(
+    new Request(`${base}/api/documents/ask`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${memberToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ methodId: 'recAAAAAAAAAAAAAA', question: 'What is this?' }),
+    }),
+  );
+  const body = await response.json();
+  assert.equal(response.status, 500);
+  assert.equal(body.error, 'gemini_not_configured');
+  assert.ok(body.message.includes('GEMINI_API_KEY'), body.message);
 });
 
 await check('a non-admin member is refused the console', async () => {

@@ -45,6 +45,18 @@
  *                            drafts admins create; one row = one notification payload)
  *   MESSAGES_TABLE            default "Messages" (Airtable table where members' in-app reports
  *                            and requests are stored for the admin console)
+ *   GEMINI_API_KEY           secret, Google AI Studio key for the "Ask AI" button on a method's
+ *                            detail screen. `POST /api/documents/ask` sends the method's attached
+ *                            PDF to Gemini as inline data, so answers are grounded in the
+ *                            document itself, and charges one of the member's daily Ask AI
+ *                            questions (Basic 5, Pro 20, Max 40, reset at 00:00 UTC). Without the
+ *                            key that route answers 500 gemini_not_configured and the rest of the
+ *                            proxy is unaffected.
+ *   GEMINI_MODEL             default "gemini-2.5-flash" (any generateContent model)
+ *   GEMINI_API_BASE          default https://generativelanguage.googleapis.com/v1beta
+ *                            (override only for tests)
+ *   GEMINI_RPM               default "10", Gemini calls one isolate may start per minute. Keeps
+ *                            the free tier's requests-per-minute limit from being tripped.
  *   APP_VERSION_CODE         newest Android build as published, default "2" (the versionCode in
  *                            app/build.gradle.kts). `/api/app/latest` serves this to installed
  *                            apps, which offer an update when their own versionCode is lower.
@@ -55,6 +67,27 @@
  *                            the update route answers but no update is offered.
  *   APP_RELEASE_NOTES        default "" (short "what's new" shown in the prompt)
  */
+
+const DEFAULT_GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta';
+const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash';
+
+/** Longest question the document assistant accepts, mirroring the app's input limit. */
+export const DOCUMENT_QUESTION_LIMIT = 1000;
+
+/** How many earlier chat turns are replayed to the model; the rest stay on the device. */
+export const DOCUMENT_HISTORY_TURNS = 8;
+
+/**
+ * The PDF grounding budget: the Worker forwards at most this much of one attached file to Gemini,
+ * keeps that copy for a few minutes because questions arrive in bursts, and remembers a handful of
+ * documents per isolate.
+ */
+export const DOCUMENT_PDF_MAX_BYTES = 12 * 1024 * 1024;
+export const DOCUMENT_PDF_CACHE_SECONDS = 600;
+export const DOCUMENT_PDF_CACHE_ENTRIES = 3;
+
+/** Gemini calls one isolate may start per minute; keeps the free tier's RPM from being tripped. */
+export const DEFAULT_GEMINI_RPM = 10;
 
 /**
  * Firebase project expected by this Worker. The app holds no server token; the Worker mints its
@@ -87,12 +120,13 @@ export function normaliseLevel(value) {
  * Daily allowances per level, enforced here (never in the APK):
  *   view     = opening a PDF in the app
  *   download = saving a copy to the phone
+ *   ask      = one question to the document assistant (paid for by the lab's Gemini key)
  * Counters live on the member's own row and reset at 00:00 UTC.
  */
 export const LIMITS = {
-  basic: { views: 5, downloads: 0 },
-  pro: { views: 20, downloads: 5 },
-  max: { views: 50, downloads: 20 },
+  basic: { views: 5, downloads: 0, asks: 5 },
+  pro: { views: 20, downloads: 5, asks: 20 },
+  max: { views: 50, downloads: 20, asks: 40 },
 };
 
 /** Members-table columns holding today's usage. */
@@ -100,6 +134,7 @@ export const USAGE_FIELDS = {
   date: 'Usage date',
   views: 'Views today',
   downloads: 'Downloads today',
+  asks: 'Ask AI today',
 };
 
 /**
@@ -135,6 +170,64 @@ export const MESSAGE_KINDS = { report: 'Report', request: 'Request' };
 
 /** A new row starts here; an admin changes it in Airtable once the message is handled. */
 export const MESSAGE_NEW_STATUS = 'New';
+
+/** Method columns the document assistant reads, in the order they are presented to the model. */
+const DOCUMENT_CONTEXT_FIELDS = [
+  'Method',
+  'Method Name',
+  'Name',
+  'Title',
+  'Scope',
+  'Summary',
+  'Description',
+  'Standard',
+  'Category',
+  'Type',
+  'Version',
+  'Year',
+  'Code',
+];
+
+/**
+ * The document text an answer is grounded in, built from a method row. Only short text columns
+ * are used, so attachments, comments and long notes never leave the Worker, and the result is
+ * capped so one rich row cannot blow up the request.
+ */
+export function documentContext(fields = {}, limit = 6000) {
+  const lines = [];
+  const seen = new Set();
+  const add = (label, value) => {
+    const text = String(value || '').trim();
+    if (!text || seen.has(text) || lines.length >= 40) return;
+    seen.add(text);
+    lines.push(`${label}: ${text}`);
+  };
+  for (const key of DOCUMENT_CONTEXT_FIELDS) add(key, firstString(fields, [key]));
+  for (const [key, value] of Object.entries(fields || {})) {
+    if (typeof value !== 'string' || value.length > 4000) continue;
+    add(key, value);
+  }
+  return lines.join('\n').slice(0, limit);
+}
+
+/**
+ * The earlier turns of a conversation, as Gemini's `contents` expects them. Anything that is not
+ * a string is dropped, consecutive turns from the same side are merged, and only the most recent
+ * turns are kept, so a client cannot replay an unbounded history.
+ */
+export function sanitiseChatHistory(history, maxTurns = DOCUMENT_HISTORY_TURNS) {
+  if (!Array.isArray(history)) return [];
+  const turns = [];
+  for (const entry of history) {
+    const text = String(entry?.text ?? '').trim().slice(0, 2000);
+    if (!text) continue;
+    const role = String(entry?.role ?? '').toLowerCase() === 'model' ? 'model' : 'user';
+    const previous = turns[turns.length - 1];
+    if (previous && previous.role === role) previous.text = `${previous.text}\n${text}`.slice(0, 4000);
+    else turns.push({ role, text });
+  }
+  return turns.slice(-maxTurns);
+}
 
 /**
  * How a notification's audience is selected. None of this flows back to the app; the app only
@@ -220,6 +313,7 @@ export function readUsage(fields, today) {
     date: today,
     views: sameDay ? usageNumber(fields, USAGE_FIELDS.views) : 0,
     downloads: sameDay ? usageNumber(fields, USAGE_FIELDS.downloads) : 0,
+    asks: sameDay ? usageNumber(fields, USAGE_FIELDS.asks) : 0,
   };
 }
 
@@ -228,6 +322,7 @@ export function usageSummary(level, usage = {}) {
   const limits = LIMITS[normaliseLevel(level)];
   const viewsUsed = Math.max(0, Math.floor(Number(usage.views) || 0));
   const downloadsUsed = Math.max(0, Math.floor(Number(usage.downloads) || 0));
+  const asksUsed = Math.max(0, Math.floor(Number(usage.asks) || 0));
   return {
     date: usage.date || null,
     viewsLimit: limits.views,
@@ -236,6 +331,9 @@ export function usageSummary(level, usage = {}) {
     downloadsLimit: limits.downloads,
     downloadsUsed,
     downloadsRemaining: Math.max(0, limits.downloads - downloadsUsed),
+    asksLimit: limits.asks,
+    asksUsed,
+    asksRemaining: Math.max(0, limits.asks - asksUsed),
   };
 }
 
@@ -247,6 +345,8 @@ function quotaHeaders(level, summary) {
     'X-Quota-Views-Used': String(summary.viewsUsed),
     'X-Quota-Downloads-Limit': String(summary.downloadsLimit),
     'X-Quota-Downloads-Used': String(summary.downloadsUsed),
+    'X-Quota-Asks-Limit': String(summary.asksLimit),
+    'X-Quota-Asks-Used': String(summary.asksUsed),
   };
 }
 
@@ -264,6 +364,8 @@ function quotaError({ level, kind, summary }) {
       summary.downloadsLimit === 0
         ? `Downloads are not included in the ${label} plan. A Pro membership allows ${LIMITS.pro.downloads} downloads a day, Max ${LIMITS.max.downloads}.`
         : `All ${summary.downloadsLimit} ${label} downloads for today are used. Pro allows ${LIMITS.pro.downloads} a day and Max ${LIMITS.max.downloads}; the count resets at 00:00 UTC.`;
+  } else if (kind === 'ask') {
+    message = `All ${summary.asksLimit} ${label} Ask AI questions for today are used. Pro allows ${LIMITS.pro.asks} a day and Max ${LIMITS.max.asks}; the count resets at 00:00 UTC.`;
   } else {
     message = `All ${summary.viewsLimit} ${label} PDF views for today are used. Pro allows ${LIMITS.pro.views} views a day and Max ${LIMITS.max.views}; the count resets at 00:00 UTC.`;
   }
@@ -271,6 +373,38 @@ function quotaError({ level, kind, summary }) {
     payload: { kind, level: normaliseLevel(level), usage: summary },
     headers: quotaHeaders(level, summary),
   });
+}
+
+/**
+ * A sliding one-minute limiter shared by every member in this isolate. Gemini's free tier allows
+ * only a handful of generateContent calls per minute; refusing at the door with a Retry-After is
+ * cheaper than spending the day collecting 429s from upstream. Returns 0 when a slot is free,
+ * otherwise the seconds to wait.
+ */
+export function createRateGate({
+  limit = DEFAULT_GEMINI_RPM,
+  windowMs = 60_000,
+  now = Date.now,
+} = {}) {
+  const hits = [];
+  return function take() {
+    const current = now();
+    while (hits.length && current - hits[0] >= windowMs) hits.shift();
+    if (hits.length >= limit) {
+      return Math.max(1, Math.ceil((windowMs - (current - hits[0])) / 1000));
+    }
+    hits.push(current);
+    return 0;
+  };
+}
+
+/** base64 for a byte array, in chunks so a multi-megabyte PDF cannot overflow the call stack. */
+export function base64FromBytes(bytes) {
+  let binary = '';
+  for (let index = 0; index < bytes.length; index += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+  }
+  return btoa(binary);
 }
 
 // ---------------------------------------------------------------------------
@@ -313,6 +447,10 @@ export function readConfig(env = {}) {
     maxNotificationsPerSend: String(env.MAX_NOTIFICATIONS_PER_SEND ?? '100').trim(),
     notificationsTable: String(env.NOTIFICATIONS_TABLE || 'Notifications').trim(),
     messagesTable: String(env.MESSAGES_TABLE || 'Messages').trim(),
+    geminiApiKey: String(env.GEMINI_API_KEY || '').trim(),
+    geminiModel: String(env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL).trim(),
+    geminiApiBase: String(env.GEMINI_API_BASE || DEFAULT_GEMINI_API_BASE).replace(/\/+$/, ''),
+    geminiRpm: positiveInt(env.GEMINI_RPM, DEFAULT_GEMINI_RPM),
     appVersionCode: positiveInt(env.APP_VERSION_CODE, 2),
     appVersionName: String(env.APP_VERSION_NAME || '1.1').trim(),
     appMinSupported: positiveInt(env.APP_MIN_SUPPORTED, 1),
@@ -1044,6 +1182,11 @@ const membershipCache = new Map();
 export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.now } = {}) {
   const config = readConfig(env);
   const keyProvider = getKey || createKeyProvider({ jwksUrl: config.jwksUrl, fetchImpl, now });
+  // Assistant brakes and caches, per isolate: the Gemini rate gate is shared by every member this
+  // instance serves, so a burst from several phones still stays under the upstream RPM.
+  const geminiGate = createRateGate({ limit: config.geminiRpm, now });
+  const askingMembers = new Set();
+  const pdfCache = new Map();
 
   async function membershipFor(identity) {
     const email = identity.email;
@@ -1450,6 +1593,233 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
     });
   }
 
+  /** The method row with [recordId], searched across the configured method tables. */
+  async function methodRecord(recordId) {
+    for (const table of config.methodsTables) {
+      try {
+        const record = await airtableRecord({
+          config,
+          table,
+          recordId,
+          fetchImpl,
+          throttle: createThrottle(),
+        });
+        if (record?.id) return record;
+      } catch (error) {
+        if (!(error instanceof HttpError) || error.status !== 404) throw error;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * POST /api/documents/ask answers a member's question about one method.
+   *
+   * The document text comes from the Airtable row, not from the request, so the answer is grounded
+   * in what the library actually holds. Gemini is called with the Worker's own key: the APK never
+   * sees an API key, and an expired or patched client cannot spend it without a valid ID token.
+   */
+  /** The first PDF attached to a method row, base64 for Gemini's inline_data part. */
+  async function documentPdf(record) {
+    const attachment = findAttachments(record?.fields || {})[0];
+    if (!attachment?.url) return null;
+    const cacheKey = String(attachment.id || attachment.url);
+    const cached = pdfCache.get(cacheKey);
+    if (cached && now() - cached.at < DOCUMENT_PDF_CACHE_SECONDS * 1000) return cached;
+    const declared = Number(attachment.size);
+    if (Number.isFinite(declared) && declared > DOCUMENT_PDF_MAX_BYTES) return null;
+    try {
+      const response = await fetchImpl(attachment.url);
+      if (!response.ok) return null;
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      if (bytes.length < 5 || bytes.length > DOCUMENT_PDF_MAX_BYTES) return null;
+      // Only a real PDF is forwarded; a broken or replaced attachment falls back to the row text.
+      if (String.fromCharCode(...bytes.subarray(0, 5)) !== '%PDF-') return null;
+      const entry = { at: now(), data: base64FromBytes(bytes) };
+      pdfCache.set(cacheKey, entry);
+      while (pdfCache.size > DOCUMENT_PDF_CACHE_ENTRIES) {
+        pdfCache.delete(pdfCache.keys().next().value);
+      }
+      return entry;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * POST /api/documents/ask answers a member's question about one method.
+   *
+   * The method's own PDF is the source of truth: the Worker fetches the attached file and sends it
+   * to Gemini as an inline PDF part, with the row's text fields as extra context. The file is kept
+   * in this isolate for a few minutes, so the follow-up questions of one conversation do not
+   * re-download it.
+   *
+   * Three brakes keep the lab's Gemini key from being spammed or from tripping the upstream rate
+   * limit: the member's daily Ask AI allowance is reserved before the call and refunded on failure,
+   * a sliding-minute gate (GEMINI_RPM) turns bursts away with Retry-After, and a member can only
+   * have one question in flight at a time.
+   */
+  async function askDocument(request) {
+    const { membership, recordId: memberRecordId } = await requireMember(request);
+    if (!config.geminiApiKey) {
+      throw new HttpError(
+        500,
+        'gemini_not_configured',
+        'The document assistant is not configured: set the Worker secret GEMINI_API_KEY to a Google AI Studio key.',
+      );
+    }
+
+    const payload = await jsonBody(request);
+    const recordId = String(payload?.methodId || '').trim();
+    if (!/^rec[A-Za-z0-9]{14}$/.test(recordId)) {
+      throw new HttpError(400, 'bad_request', 'A valid method id is required.');
+    }
+    const question = String(payload?.question || '').trim();
+    if (question.length < 2) {
+      throw new HttpError(400, 'invalid_question', 'Type a question about this document first.');
+    }
+    if (question.length > DOCUMENT_QUESTION_LIMIT) {
+      throw new HttpError(
+        400,
+        'invalid_question',
+        `Keep the question under ${DOCUMENT_QUESTION_LIMIT} characters.`,
+      );
+    }
+
+    const record = await methodRecord(recordId);
+    if (!record) throw new HttpError(404, 'not_found', 'That method is no longer in the library.');
+
+    if (memberRecordId && askingMembers.has(memberRecordId)) {
+      throw new HttpError(
+        429,
+        'assistant_busy',
+        'Wait for the current answer before asking another question.',
+        { headers: { 'Retry-After': '5' } },
+      );
+    }
+    const waitSeconds = geminiGate();
+    if (waitSeconds > 0) {
+      throw new HttpError(
+        429,
+        'assistant_busy',
+        `The assistant is answering other questions right now. Try again in ${waitSeconds} seconds.`,
+        { headers: { 'Retry-After': String(waitSeconds) } },
+      );
+    }
+
+    // Reserve one of today's questions before spending the lab's key; refundAskQuota() gives it
+    // back if the call fails.
+    const quota = await consumeQuota({
+      recordId: memberRecordId,
+      level: membership.level,
+      kind: 'ask',
+    });
+
+    const method = mapMethod(record, '');
+    const context = documentContext(record.fields || {});
+    const pdf = await documentPdf(record);
+    const instruction = pdf
+      ? "The method's full PDF is attached to the final question. Treat its text as the source " +
+        'of truth: quote clause numbers, limits and tolerances only as they appear in that PDF, ' +
+        'and say plainly when a question is outside what the document covers.'
+      : "The method's PDF could not be read for this request, so only the recorded details below " +
+        'are available. Say plainly when a question needs the full document, and never invent ' +
+        'clause numbers, limits or tolerances.';
+    const system =
+      'You answer questions about one textile test method for a member of the TexLab app. ' +
+      instruction +
+      ' Be concise and practical, and answer in the language of the question.\n\n' +
+      `Document: ${method.title}` +
+      (method.name && method.name !== method.title ? ` — ${method.name}` : '') +
+      '\n' +
+      (context || 'No further details were recorded for this method.');
+
+    const questionParts = [];
+    if (pdf) {
+      questionParts.push({ inline_data: { mime_type: 'application/pdf', data: pdf.data } });
+    }
+    questionParts.push({ text: question });
+    const contents = [
+      ...sanitiseChatHistory(payload?.history).map((turn) => ({
+        role: turn.role,
+        parts: [{ text: turn.text }],
+      })),
+      { role: 'user', parts: questionParts },
+    ];
+
+    if (memberRecordId) askingMembers.add(memberRecordId);
+    try {
+      const response = await fetchImpl(
+        `${config.geminiApiBase}/models/${encodeURIComponent(config.geminiModel)}:generateContent`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-goog-api-key': config.geminiApiKey,
+          },
+          body: JSON.stringify({
+            system_instruction: { parts: [{ text: system.slice(0, 20000) }] },
+            contents,
+            generationConfig: { temperature: 0.2, maxOutputTokens: 1024 },
+          }),
+        },
+      );
+      const text = await response.text();
+      let body = {};
+      try {
+        body = JSON.parse(text);
+      } catch {
+        body = {};
+      }
+      // A 429 from Google is not retried here: retrying is exactly what trips the limit. The
+      // member gets a short Retry-After and their reserved question back.
+      if (response.status === 429) {
+        throw new HttpError(
+          429,
+          'assistant_busy',
+          'The AI service is busy right now. Try again in a minute.',
+          { payload: { retryAfter: 60 }, headers: { 'Retry-After': '60' } },
+        );
+      }
+      if (!response.ok) {
+        const detail = String(body?.error?.message || '').slice(0, 300);
+        throw new HttpError(
+          502,
+          'gemini_error',
+          detail
+            ? `The assistant could not answer: ${detail}`
+            : `The assistant could not answer (HTTP ${response.status}).`,
+          { payload: { status: response.status } },
+        );
+      }
+
+      const answer = (body?.candidates?.[0]?.content?.parts || [])
+        .filter((part) => part && typeof part.text === 'string' && !part.thought)
+        .map((part) => part.text)
+        .join('')
+        .trim();
+      if (!answer) {
+        throw new HttpError(502, 'gemini_empty', 'The assistant returned an empty answer. Try again.');
+      }
+      return jsonResponse(
+        200,
+        {
+          answer,
+          model: config.geminiModel,
+          methodId: recordId,
+          groundedIn: pdf ? 'pdf' : 'metadata',
+          usage: quota.summary,
+        },
+        quotaHeaders(membership.level, quota.summary),
+      );
+    } catch (error) {
+      await refundAskQuota(memberRecordId, quota.usage);
+      throw error;
+    } finally {
+      if (memberRecordId) askingMembers.delete(memberRecordId);
+    }
+  }
+
   /**
    * POST /api/admin/notify sends one push to the members an admin selected; GET reports whether
    * push is configured. Only an audience summary and per-recipient result codes come back — no
@@ -1555,7 +1925,9 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
 
   /** Reads today's counters for a member row without consuming anything. */
   async function usageFor(recordId, level) {
-    if (!recordId) return usageSummary(level, { date: todayKey(now), views: 0, downloads: 0 });
+    if (!recordId) {
+      return usageSummary(level, { date: todayKey(now), views: 0, downloads: 0, asks: 0 });
+    }
     const record = await airtableRecord({ config, table: config.membersTable, recordId, fetchImpl, throttle: createThrottle() });
     return usageSummary(level, readUsage((record && record.fields) || {}, todayKey(now)));
   }
@@ -1569,22 +1941,31 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
     if (!recordId) {
       // No recordId available - allow the action but don't update counters
       // This can happen for newly created members or edge cases
-      // Basic level: 5 views, no downloads; Pro: 20 views + 5 downloads; Max: 50 views + 20 downloads
       const levelNorm = normaliseLevel(level);
       const limits = LIMITS[levelNorm];
       if (kind === 'download' && limits.downloads === 0) {
         throw new HttpError(429, 'quota_exceeded', `Downloads are not included in the ${levelNorm.charAt(0).toUpperCase() + levelNorm.slice(1)} plan.`);
       }
-      // Allow view/download without updating counters (no row to update)
-      return { level: levelNorm, usage: { date: today, views: 0, downloads: 0 }, summary: usageSummary(levelNorm, { date: today, views: 0, downloads: 0 }) };
+      // Allow view/download/ask without updating counters (no row to update)
+      return {
+        level: levelNorm,
+        usage: { date: today, views: 0, downloads: 0, asks: 0 },
+        summary: usageSummary(levelNorm, { date: today, views: 0, downloads: 0, asks: 0 }),
+      };
     }
     const record = await airtableRecord({ config, table: config.membersTable, recordId, fetchImpl, throttle: createThrottle() });
     const usage = readUsage((record && record.fields) || {}, today);
     const summary = usageSummary(level, usage);
-    const remaining = kind === 'download' ? summary.downloadsRemaining : summary.viewsRemaining;
+    const remaining =
+      kind === 'download'
+        ? summary.downloadsRemaining
+        : kind === 'ask'
+          ? summary.asksRemaining
+          : summary.viewsRemaining;
     if (remaining <= 0) throw quotaError({ level, kind, summary });
 
     if (kind === 'download') usage.downloads += 1;
+    else if (kind === 'ask') usage.asks += 1;
     else usage.views += 1;
 
     await airtableWrite({
@@ -1595,11 +1976,37 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
         [USAGE_FIELDS.date]: today,
         [USAGE_FIELDS.views]: usage.views,
         [USAGE_FIELDS.downloads]: usage.downloads,
+        [USAGE_FIELDS.asks]: usage.asks,
       },
       fetchImpl,
       throttle: createThrottle(),
     });
     return { level: normaliseLevel(level), usage, summary: usageSummary(level, usage) };
+  }
+
+  /**
+   * Gives back the Ask AI question reserved before a Gemini call that then failed, so a network
+   * error or an upstream refusal does not cost the member one of their daily questions.
+   */
+  async function refundAskQuota(recordId, usage) {
+    if (!recordId || !usage) return;
+    try {
+      await airtableWrite({
+        config,
+        table: config.membersTable,
+        recordId,
+        fields: {
+          [USAGE_FIELDS.date]: usage.date,
+          [USAGE_FIELDS.views]: usage.views,
+          [USAGE_FIELDS.downloads]: usage.downloads,
+          [USAGE_FIELDS.asks]: Math.max(0, Number(usage.asks || 0) - 1),
+        },
+        fetchImpl,
+        throttle: createThrottle(),
+      });
+    } catch {
+      // Best effort: the answer already failed, and the next question still gets a correct count.
+    }
   }
 
   async function identityFrom(request) {
@@ -1660,6 +2067,7 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
         configured: Boolean(config.airtableToken && config.baseId),
         fcm: fcmConfigured(config),
         update: Boolean(config.appApkUrl),
+        assistant: Boolean(config.geminiApiKey),
       });
     }
 
@@ -1717,6 +2125,12 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
     if (url.pathname === '/api/messages') {
       if (method !== 'POST') throw new HttpError(405, 'method_not_allowed', 'Only POST is supported.');
       return submitMessage(request);
+    }
+
+    // The "Ask AI" button: a member's question about one method, answered from that row.
+    if (url.pathname === '/api/documents/ask') {
+      if (method !== 'POST') throw new HttpError(405, 'method_not_allowed', 'Only POST is supported.');
+      return askDocument(request);
     }
 
     if (url.pathname === '/api/admin/messages') {
