@@ -42,8 +42,8 @@ android {
         minSdk = 26
         targetSdk = 35
         // Bump both for every published build: the proxy's /api/app/latest compares against them.
-        versionCode = 6
-        versionName = "1.14"
+        versionCode = 7
+        versionName = "1.15"
 
         // Optional override: normally read from google-services.json (default_web_client_id).
         buildConfigField("String", "GOOGLE_WEB_CLIENT_ID", quoted(config("GOOGLE_WEB_CLIENT_ID")))

@@ -655,6 +655,22 @@ await check('Pro members can download 5 PDFs a day, then 429', async () => {
   assert.equal(me.body.usage.downloadsUsed, 5);
 });
 
+await check('printing spends one download but sends no PDF again', async () => {
+  seedMember('printer@example.com', { Name: 'Print Me', Status: 'Active', Level: 'Pro' });
+  const token = mintToken(googleClaims('printer@example.com', 'Print', 'Me', ''));
+  const response = await handle(
+    new Request(`${base}/api/files/ISO/recAAAAAAAAAAAAAA/attPDF00000000001?mode=print`, {
+      headers: { Authorization: `Bearer ${token}` },
+    }),
+  );
+  assert.equal(response.status, 204, 'printing must not stream the PDF');
+  assert.equal(response.headers.get('x-quota-downloads-used'), '1');
+  assert.equal(response.headers.get('x-quota-views-used'), '0', 'printing must not spend a view');
+  await response.arrayBuffer();
+  const me = await request('/api/me', token);
+  assert.equal(me.body.usage.downloadsUsed, 1);
+});
+
 await check('counters from an earlier day reset at 00:00 UTC', async () => {
   seedMember('reset@example.com', {
     Name: 'Reset Me',
@@ -759,6 +775,30 @@ await check('the admin console lists members with their push state', async () =>
   assert.equal(row.fcmRegistered, true);
   assert.equal(row.role, 'Admin');
   assert.ok(!JSON.stringify(body).includes(DEVICE_TOKEN), 'no device token may appear in the list');
+});
+
+await check('the admin console shows who is active and when the rest were last seen', async () => {
+  await request('/api/me', memberToken);
+  const stale = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  members.get('pro@example.com').fields['Last active'] = stale;
+
+  const { body } = await call('/api/admin/members', { token: adminToken });
+  const active = body.members.find((entry) => entry.email === 'member@example.com');
+  assert.equal(active.online, true, 'a member who just called the API must be online');
+  assert.ok(active.lastActiveAt, 'the last active timestamp must be returned');
+  assert.ok(
+    Math.abs(Date.parse(active.lastActiveAt) - Date.now()) < 60 * 1000,
+    'the timestamp must be the time of the request',
+  );
+
+  const away = body.members.find((entry) => entry.email === 'pro@example.com');
+  assert.equal(away.online, false, 'a stale timestamp must not light the dot');
+  assert.equal(away.lastActiveAt, stale, 'the stored time must be returned as it is');
+  assert.equal(
+    members.get('member@example.com').fields['Last active'],
+    active.lastActiveAt,
+    'the Worker must record activity on the member row',
+  );
 });
 
 await check('a member sends an in-app report that lands in the Messages table', async () => {

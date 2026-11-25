@@ -448,6 +448,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * Charges the download printing costs. The viewer prints the PDF it already opened, so the
+     * proxy is only asked to count the download, not to send the file again.
+     */
+    suspend fun chargePrint(method: TestMethod): Unit {
+        pdfStore.markPrinted(method)?.let(::applyQuota)
+    }
+
     /** Fetches the PDF for in-app viewing; the proxy counts one view for this. */
     suspend fun preparePdf(method: TestMethod, onProgress: (Float) -> Unit = {}): File {
         val viewed = pdfStore.fetchForView(method, onProgress)

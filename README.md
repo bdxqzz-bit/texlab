@@ -87,7 +87,7 @@ npx wrangler secret put AIRTABLE_TOKEN    # then npx wrangler deploy (your own a
 | `GET /healthz` | Liveness check, no token needed |
 | `GET /api/me` | `{member, level, levelLabel, name, firstName, lastName, photoUrl, role, usage}`; a first-time account joins here as Basic, an inactive row gets `403 not_a_member`, `usage` is today's allowance |
 | `GET /api/methods` | Merged, sorted method list with proxy-relative PDF URLs |
-| `GET /api/files/{table}/{recordId}/{attachmentId}?mode=view\|download` | Streams the PDF and charges one view (default) or one download; over the limit it answers `429 quota_exceeded` with a readable message |
+| `GET /api/files/{table}/{recordId}/{attachmentId}?mode=view\|download\|print` | Streams the PDF and charges one view (default) or one download; `mode=print` charges a download but answers `204` with no body, because the app prints the copy it already opened; over the limit it answers `429 quota_exceeded` with a readable message |
 
 Every `/api/*` request needs `Authorization: Bearer <Firebase ID token>`. The server checks the
 RS256 signature against Google's published certificates, the issuer and audience
@@ -115,7 +115,9 @@ filled in from the profile when those columns are empty. A row whose `Status` is
 The counters live on the member's own row (`Usage date`, `Views today`, `Downloads today`) and
 are checked and incremented by the Worker before any PDF byte is sent, so clearing the app's
 cache, a patched APK or a copied ID token cannot get around them. A view is charged when the
-method page's **View** opens a PDF; a download when **Download** saves one. `/api/me` and every
+method page's **View** opens a PDF; a download when **Download** saves one, or when the
+viewer's **Print** sends the open PDF to Android's print dialog (the app prints its cached copy,
+so printing spends a download without fetching the PDF a second time). `/api/me` and every
 PDF response report the remaining allowance (`usage`, and `X-Quota-*` headers) so the app can
 show it, and an exhausted allowance answers `429 quota_exceeded` naming the limit and the reset
 time. Raise a member's allowance by setting `Level` to `Pro` or `Max` in the Members table.
@@ -158,7 +160,7 @@ is `Admin`, `Administrator`, `Owner` or `Manager`):
 | `POST /api/notifications/register` | `{token, appId}` — stores this device on the member's row |
 | `POST /api/notifications/unregister` | Clears the device from the row (switch off / sign out) |
 | `GET /api/admin/messages` | The member inbox: reports and requests sent from the app, newest first |
-| `GET /api/admin/members` | Member list with level, role, status, push state and today's usage |
+| `GET /api/admin/members` | Member list with level, role, status, push state, today's usage and presence (`online` + `lastActiveAt`: the console shows a green dot while active and "last active …" otherwise) |
 | `POST /api/admin/members/{recordId}/push-token`, `DELETE …` | Sets or clears one member's device token |
 | `GET /api/admin/notify` | Whether push is configured on the Worker |
 | `POST /api/admin/notify` | `{title, body, targetMode, targetLevel, suppressedEmails}` — sends one push per reachable device |
@@ -260,7 +262,10 @@ missing, `POST /api/messages` answers `502 airtable_error` naming the table.
 `Last name`, `Photo` (url), `Level` (single select `Basic`/`Pro`/`Max`), `Status`, `Role`, and the
 daily counters `Usage date` (single line text, `YYYY-MM-DD`), `Views today` and
 `Downloads today` (numbers). Without the three counter columns PDFs fail closed with
-`502 quota_store_error`, because the allowance cannot be recorded.
+`502 quota_store_error`, because the allowance cannot be recorded. `Last active` (single line
+text, ISO UTC) is written by the Worker on `/api/me` and `/api/methods`, at most once every two
+minutes per member, and read for the console's presence line: the green dot means a request in
+the last five minutes, otherwise the list shows how long ago the member was last seen.
 Rows are created automatically on first sign-in as Basic with the Google name and photo; raise a
 member by setting `Level` to `Pro` or `Max`. Active values: `Active`, `Approved`, `Member`,
 `Paid`, `Yes`, `1`, `True`, `Current`, `Enabled`. A row without a `Status` column counts as

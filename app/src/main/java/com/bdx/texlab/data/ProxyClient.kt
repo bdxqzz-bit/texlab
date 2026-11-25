@@ -28,6 +28,9 @@ class ProxyException(
 enum class FileMode(val value: String) {
     VIEW("view"),
     DOWNLOAD("download"),
+
+    /** Printing: charged as a download, but the proxy sends no PDF because the viewer has it. */
+    PRINT("print"),
 }
 
 @Serializable
@@ -131,6 +134,8 @@ private data class AdminMemberDto(
     val photoUrl: String? = null,
     val fcmRegistered: Boolean = false,
     val fcmRegisteredAt: String = "",
+    val lastActiveAt: String? = null,
+    val online: Boolean = false,
     val usage: AdminUsageDto? = null,
 )
 
@@ -272,6 +277,25 @@ class ProxyClient(
                 quota
             }
         }
+
+    /**
+     * Charges one download for printing a PDF the viewer already holds. The proxy answers 204
+     * with today's counters instead of streaming the file again, so printing costs no extra data.
+     */
+    suspend fun chargePrint(path: String): UsageQuota? = withContext(Dispatchers.IO) {
+        http.newCall(request(withMode(path, FileMode.PRINT))).execute().use { response ->
+            val quota = quotaFrom(response)
+            if (!response.isSuccessful) {
+                throw ProxyException(
+                    describe(response.code, response.body?.string().orEmpty()),
+                    response.code,
+                    quota,
+                )
+            }
+            response.body?.close()
+            quota
+        }
+    }
 
     /**
      * Registers this install's Firebase device token against the signed-in member row. The proxy
@@ -521,6 +545,8 @@ private fun AdminMemberDto.toAdminMember() = AdminMember(
     status = status,
     photoUrl = photoUrl?.takeIf { it.startsWith("http") },
     registeredAt = fcmRegisteredAt,
+    lastActiveAt = lastActiveAt.orEmpty(),
+    online = online,
     viewsUsed = usage?.viewsUsed ?: 0,
     viewsLimit = usage?.viewsLimit ?: 0,
     downloadsUsed = usage?.downloadsUsed ?: 0,

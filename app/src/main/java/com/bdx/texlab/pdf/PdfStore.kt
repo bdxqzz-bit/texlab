@@ -26,7 +26,8 @@ data class ViewedPdf(val file: File, val quota: UsageQuota?)
  *
  * Every fetch goes through the proxy, which charges one view or one download against the
  * member's daily allowance, so a cached file is not a way around the limit: viewing always
- * re-fetches as a view.
+ * re-fetches as a view. Printing is charged as a download, but it prints the copy already
+ * cached for viewing instead of fetching the PDF again.
  */
 class PdfStore(
     private val context: Context,
@@ -69,6 +70,17 @@ class PdfStore(
             } finally {
                 temp.delete()
             }
+        }
+
+    /**
+     * Charges the download printing costs, without fetching the PDF again: the viewer prints the
+     * copy it already opened, so only the quota changes.
+     */
+    suspend fun markPrinted(method: TestMethod): UsageQuota? =
+        withContext(Dispatchers.IO) {
+            val attachment = method.pdf
+                ?: throw IllegalStateException("This method has no PDF attached.")
+            client.chargePrint(attachment.url)
         }
 
     private suspend fun exportToDownloads(source: File, displayName: String): SavedLocation =

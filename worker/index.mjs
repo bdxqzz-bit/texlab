@@ -318,6 +318,13 @@ const PHOTO_FIELDS = ['Photo', 'Photo URL', 'Picture', 'Avatar'];
 const ROLE_FIELDS = ['Role', 'Access'];
 const FCM_FIELDS = ['FCM token', 'Push token', 'Device token'];
 const MEMBER_EMAIL_FIELDS = ['Email', 'Member email', 'User email'];
+// ISO timestamp of the member's last request, written by the Worker. The console shows a green
+// dot while it is recent and the time otherwise.
+const LAST_ACTIVE_FIELD = 'Last active';
+/** How often one member's cell may be rewritten by this isolate. */
+const LAST_ACTIVE_WRITE_MS = 2 * 60 * 1000;
+/** A member counts as active while their last request is this recent. */
+const ACTIVE_WINDOW_MS = 5 * 60 * 1000;
 
 const ADMIN_ROLES = new Set(['admin', 'administrator', 'owner', 'manager'].map((value) =>
   value.toLowerCase(),
@@ -1230,6 +1237,35 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
   const geminiGate = createRateGate({ limit: config.geminiRpm, now });
   const askingMembers = new Set();
   const pdfCache = new Map();
+  // email -> ms of the last "Last active" write this isolate made, so ordinary browsing does not
+  // spend an Airtable write per request.
+  const lastActiveWrites = new Map();
+
+  /**
+   * Stamps the member's row with the current time for the admin console's presence view. A failed
+   * write (a read-only token, for instance) is logged and ignored: it must never fail the request
+   * the member actually made.
+   */
+  async function touchLastActive(recordId, email) {
+    const key = String(email || '').trim().toLowerCase();
+    if (!recordId || !key) return;
+    const at = now();
+    if (at - (lastActiveWrites.get(key) || 0) < LAST_ACTIVE_WRITE_MS) return;
+    lastActiveWrites.set(key, at);
+    try {
+      await airtableWrite({
+        config,
+        table: config.membersTable,
+        recordId,
+        fields: { [LAST_ACTIVE_FIELD]: new Date(at).toISOString() },
+        fetchImpl,
+        throttle: createThrottle(),
+      });
+    } catch (error) {
+      lastActiveWrites.delete(key);
+      console.warn('[proxy] last active not recorded:', error?.message || error);
+    }
+  }
 
   async function membershipFor(identity) {
     const email = identity.email;
@@ -1354,6 +1390,9 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
     const email = firstString(fields, MEMBER_EMAIL_FIELDS);
     if (!email) return null;
     const level = normaliseLevel(firstString(fields, LEVEL_FIELDS));
+    const lastActiveRaw = firstString(fields, [LAST_ACTIVE_FIELD]);
+    const lastActiveMs = Date.parse(lastActiveRaw);
+    const lastActiveAt = Number.isFinite(lastActiveMs) ? new Date(lastActiveMs).toISOString() : null;
     return {
       id: String(record.id || ''),
       email: email.toLowerCase(),
@@ -1368,6 +1407,8 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
       fcmRegistered: fcmRegistered(fields, record),
       fcmTokenPreview: firstFcmToken(fields, record).slice(0, 8) + '…',
       fcmRegisteredAt: firstString(fields, ['FCM registered at']),
+      lastActiveAt,
+      online: lastActiveAt ? now() - lastActiveMs <= ACTIVE_WINDOW_MS : false,
       usage: usageSummary(level, readUsage(fields, todayKey(now))),
     };
   }
@@ -2202,7 +2243,8 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
       if (method !== 'GET' && method !== 'HEAD') {
         throw new HttpError(405, 'method_not_allowed', 'Only GET and HEAD are supported.');
       }
-      const { membership, recordId } = await requireMember(request);
+      const { identity, membership, recordId } = await requireMember(request);
+      await touchLastActive(recordId, identity.email);
       const usage = await usageFor(recordId, membership.level);
       return jsonResponse(200, { ...membership, usage }, { Vary: 'Authorization' });
     }
@@ -2270,7 +2312,8 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
       if (method !== 'GET' && method !== 'HEAD') {
         throw new HttpError(405, 'method_not_allowed', 'Only GET and HEAD are supported.');
       }
-      await requireMember(request);
+      const { identity, recordId } = await requireMember(request);
+      await touchLastActive(recordId, identity.email);
       const records = [];
       for (const table of config.methodsTables) {
         const page = await airtableList({ config, table, fetchImpl, throttle: createThrottle() });
@@ -2294,8 +2337,12 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
     const fileMatch = /^\/api\/files\/([^/]+)\/([^/]+)\/([^/]+)$/.exec(url.pathname);
     if (fileMatch) {
       const { membership, recordId: memberRecordId } = await requireMember(request);
-      // Opening (view) and saving (download) are counted separately against the daily allowance.
-      const mode = url.searchParams.get('mode') === 'download' ? 'download' : 'view';
+      // Opening (view), saving (download) and printing are counted against the daily allowance.
+      // Printing is charged as a download, but the PDF is not streamed again: the app already
+      // has the copy it opened, so the member only spends the download slot.
+      const requestedMode = String(url.searchParams.get('mode') || '').toLowerCase();
+      const mode =
+        requestedMode === 'download' ? 'download' : requestedMode === 'print' ? 'print' : 'view';
       const table = decodeURIComponent(fileMatch[1]);
       const recordId = decodeURIComponent(fileMatch[2]);
       const attachmentId = decodeURIComponent(fileMatch[3]);
@@ -2322,7 +2369,22 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
       const quota =
         method === 'HEAD'
           ? { summary: await usageFor(memberRecordId, membership.level) }
-          : await consumeQuota({ recordId: memberRecordId, level: membership.level, kind: mode });
+          : await consumeQuota({
+              recordId: memberRecordId,
+              level: membership.level,
+              kind: mode === 'view' ? 'view' : 'download',
+            });
+
+      if (mode === 'print') {
+        return new Response(null, {
+          status: 204,
+          headers: {
+            'Cache-Control': 'private, no-store',
+            Vary: 'Authorization',
+            ...quotaHeaders(membership.level, quota.summary),
+          },
+        });
+      }
 
       const filename = String(attachment.filename || 'method.pdf').replace(/"/g, '');
       const headers = {

@@ -207,6 +207,7 @@ private fun MemberArea(state: AppUiState, viewModel: AppViewModel) {
                 method = method,
                 onBack = { navController.popBackStack() },
                 onDownload = viewModel::download,
+                chargePrint = { target -> viewModel.chargePrint(target) },
                 preparePdf = { target, progress -> viewModel.preparePdf(target, progress) },
             )
         }

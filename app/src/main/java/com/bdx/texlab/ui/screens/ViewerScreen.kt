@@ -16,6 +16,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Print
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -25,6 +26,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -34,6 +37,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -46,6 +50,8 @@ import com.bdx.texlab.BuildConfig
 import com.bdx.texlab.data.TestMethod
 import com.bdx.texlab.pdf.PdfViewer
 import com.bdx.texlab.pdf.pdfShareIntent
+import com.bdx.texlab.pdf.printPdf
+import kotlinx.coroutines.launch
 import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -54,9 +60,13 @@ fun ViewerScreen(
     method: TestMethod?,
     onBack: () -> Unit,
     onDownload: (TestMethod) -> Unit,
+    chargePrint: suspend (TestMethod) -> Unit,
     preparePdf: suspend (TestMethod, (Float) -> Unit) -> File,
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val snackbar = remember { SnackbarHostState() }
+    var printing by remember(method?.id) { mutableStateOf(false) }
     var file by remember(method?.id) { mutableStateOf<File?>(null) }
     var progress by remember(method?.id) { mutableStateOf<Float?>(null) }
     var error by remember(method?.id) { mutableStateOf<String?>(null) }
@@ -80,6 +90,7 @@ fun ViewerScreen(
     }
 
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
             TopAppBar(
                 navigationIcon = {
@@ -107,6 +118,29 @@ fun ViewerScreen(
                 },
                 actions = {
                     val openFile = file
+                    val target = method
+                    // Printing spends one download but reuses the PDF already on screen.
+                    IconButton(
+                        onClick = {
+                            if (openFile == null || target == null || printing) return@IconButton
+                            printing = true
+                            scope.launch {
+                                runCatching { chargePrint(target) }
+                                    .onSuccess {
+                                        printPdf(context, openFile, target.title.ifBlank { "Test method" })
+                                    }
+                                    .onFailure { error ->
+                                        snackbar.showSnackbar(
+                                            error.message ?: "Printing is unavailable right now."
+                                        )
+                                    }
+                                printing = false
+                            }
+                        },
+                        enabled = openFile != null && !printing,
+                    ) {
+                        Icon(Icons.Filled.Print, contentDescription = "Print PDF (counts as a download)")
+                    }
                     IconButton(
                         onClick = {
                             if (openFile != null) {

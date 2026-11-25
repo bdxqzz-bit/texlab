@@ -1,6 +1,11 @@
 package com.bdx.texlab.data
 
 import kotlinx.serialization.Serializable
+import java.time.Duration
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 
 /** A file attached to a method, addressed through the proxy (`url` is a proxy-relative path). */
 @Serializable
@@ -154,6 +159,10 @@ data class AdminMember(
     val photoUrl: String? = null,
     /** The day this device last registered, when the row records it. */
     val registeredAt: String = "",
+    /** ISO time of this member's last request to the proxy, when the row records it. */
+    val lastActiveAt: String = "",
+    /** True while that request is recent enough to earn the console's green dot. */
+    val online: Boolean = false,
     val viewsUsed: Int = 0,
     val viewsLimit: Int = 0,
     val downloadsUsed: Int = 0,
@@ -167,6 +176,28 @@ data class AdminMember(
     /** False only when the Status column names something that does not grant access. */
     val active: Boolean get() = memberStatus == MemberStatus.ACTIVE
     val statusLabel: String get() = status.takeIf { it.isNotBlank() } ?: MemberStatus.ACTIVE.label
+    /** "Active now" (with the green dot), or how long ago this member last used the app. */
+    val presenceLabel: String
+        get() = when {
+            online -> "Active now"
+            lastActiveAt.isBlank() -> "Not active yet"
+            else -> "Last active ${relativeTime(lastActiveAt)}"
+        }
+}
+
+/** "2 min ago" / "3 h ago" / "on 21 Nov" for an ISO timestamp, read in the device's zone. */
+private fun relativeTime(iso: String): String {
+    val at = runCatching { Instant.parse(iso) }.getOrNull() ?: return "recently"
+    val minutes = Duration.between(at, Instant.now()).toMinutes().coerceAtLeast(0)
+    return when {
+        minutes < 1 -> "just now"
+        minutes < 60 -> "$minutes min ago"
+        minutes < 60 * 24 -> "${minutes / 60} h ago"
+        minutes < 60 * 24 * 7 -> "${minutes / (60 * 24)} d ago"
+        else -> "on " + DateTimeFormatter.ofPattern("d MMM", Locale.getDefault())
+            .withZone(ZoneId.systemDefault())
+            .format(at)
+    }
 }
 
 /** One report or request a member sent from inside the app; the admin console lists these. */
