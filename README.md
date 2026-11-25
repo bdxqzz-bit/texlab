@@ -189,7 +189,8 @@ cd worker
 npx wrangler secret put GEMINI_API_KEY     # a Google AI Studio key from https://aistudio.google.com/apikey
 ```
 
-`GEMINI_MODEL` (default `gemini-2.5-flash`) picks the model. Only the last eight chat turns are
+`GEMINI_MODEL` (default `gemini-3.1-flash-lite`) picks the model; older flash models such as
+`gemini-2.5-flash` are retired for new API keys. Only the last eight chat turns are
 replayed to the model, and a question is capped at 1000 characters.
 
 **Ask AI limits.** Each level gets a daily number of questions — Basic 5, Pro 20, Max 40 —

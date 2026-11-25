@@ -52,7 +52,7 @@
  *                            questions (Basic 5, Pro 20, Max 40, reset at 00:00 UTC). Without the
  *                            key that route answers 500 gemini_not_configured and the rest of the
  *                            proxy is unaffected.
- *   GEMINI_MODEL             default "gemini-2.5-flash" (any generateContent model)
+ *   GEMINI_MODEL             default "gemini-3.1-flash-lite" (any generateContent model)
  *   GEMINI_API_BASE          default https://generativelanguage.googleapis.com/v1beta
  *                            (override only for tests)
  *   GEMINI_RPM               default "10", Gemini calls one isolate may start per minute. Keeps
@@ -69,7 +69,9 @@
  */
 
 const DEFAULT_GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta';
-const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash';
+// Google retires older flash models for new keys; 3.1 flash-lite accepts inline PDFs and is
+// available on the free tier. Override with GEMINI_MODEL if the account has another model.
+const DEFAULT_GEMINI_MODEL = 'gemini-3.1-flash-lite';
 
 /** Longest question the document assistant accepts, mirroring the app's input limit. */
 export const DOCUMENT_QUESTION_LIMIT = 1000;

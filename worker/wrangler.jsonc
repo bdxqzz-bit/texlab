@@ -14,7 +14,7 @@
     // "Ask AI" on a method's detail screen: answers are grounded in the method's attached PDF.
     // The key is a secret, never a var:
     //   npx wrangler secret put GEMINI_API_KEY
-    "GEMINI_MODEL": "gemini-2.5-flash",
+    "GEMINI_MODEL": "gemini-3.1-flash-lite",
     // Gemini calls one Worker isolate may start per minute, so the free tier's RPM is not tripped.
     "GEMINI_RPM": "10",
     "FIREBASE_PROJECT_ID": "android-49288",
