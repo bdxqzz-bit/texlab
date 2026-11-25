@@ -51,7 +51,9 @@
  *                            document itself, and charges one of the member's daily Ask AI
  *                            questions (Basic 5, Pro 20, Max 40, reset at 00:00 UTC). Without the
  *                            key that route answers 500 gemini_not_configured and the rest of the
- *                            proxy is unaffected.
+ *                            proxy is unaffected. When the row links a counterpart method in the
+ *                            other standard (Airtable `AATCC` / `ISO Counterpart`), that method's
+ *                            PDF is attached too, so the answer can compare the two.
  *   GEMINI_MODEL             default "gemini-3.1-flash-lite" (any generateContent model)
  *   GEMINI_API_BASE          default https://generativelanguage.googleapis.com/v1beta
  *                            (override only for tests)
@@ -86,7 +88,46 @@ export const DOCUMENT_HISTORY_TURNS = 8;
  */
 export const DOCUMENT_PDF_MAX_BYTES = 12 * 1024 * 1024;
 export const DOCUMENT_PDF_CACHE_SECONDS = 600;
-export const DOCUMENT_PDF_CACHE_ENTRIES = 3;
+export const DOCUMENT_PDF_CACHE_ENTRIES = 4;
+
+/**
+ * One question can carry the method's own PDF and its counterpart's (ISO ↔ AATCC). Both go to
+ * Gemini in the same inline request, so their combined base64 must stay inside the request budget.
+ */
+export const DOCUMENT_PAIR_MAX_BASE64 = 18 * 1024 * 1024;
+
+/** The Airtable link columns that pair an ISO method with its AATCC counterpart and back. */
+export const COUNTERPART_FIELDS = [
+  'AATCC',
+  'ISO Counterpart',
+  'ISO',
+  'Counterpart',
+  'Equivalent',
+  'Equivalent Method',
+];
+
+/**
+ * The methods linked to a row as its counterpart in the other standard family. Airtable returns
+ * linked records as arrays of record ids; a row the lab has not paired has no such column or an
+ * empty array, which means "no comparison available" rather than an error.
+ */
+export function counterpartIds(fields = {}, limit = 2) {
+  const ids = [];
+  const collect = (value) => {
+    for (const item of Array.isArray(value) ? value : []) {
+      if (typeof item === 'string' && /^rec[A-Za-z0-9]{14}$/.test(item) && !ids.includes(item)) {
+        ids.push(item);
+      }
+    }
+  };
+  for (const key of COUNTERPART_FIELDS) collect(fields?.[key]);
+  // A lab that renames the column still works when the new name says what it is.
+  for (const [key, value] of Object.entries(fields || {})) {
+    if (COUNTERPART_FIELDS.some((name) => name.toLowerCase() === key.toLowerCase())) continue;
+    if (/counterpart|equivalent/i.test(key)) collect(value);
+  }
+  return ids.slice(0, limit);
+}
 
 /** Gemini calls one isolate may start per minute; keeps the free tier's RPM from being tripped. */
 export const DEFAULT_GEMINI_RPM = 10;
@@ -1615,12 +1656,23 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
   }
 
   /**
-   * POST /api/documents/ask answers a member's question about one method.
-   *
-   * The document text comes from the Airtable row, not from the request, so the answer is grounded
-   * in what the library actually holds. Gemini is called with the Worker's own key: the APK never
-   * sees an API key, and an expired or patched client cannot spend it without a valid ID token.
+   * The method the lab recorded as this one's counterpart in the other standard family, if any.
+   * The link is an Airtable record id, so the row is read back with the same helper that serves a
+   * normal method page; a dead link reads as "no counterpart" instead of failing the question.
    */
+  async function counterpartRecord(record) {
+    for (const id of counterpartIds(record?.fields || {})) {
+      if (id === String(record?.id || '')) continue;
+      try {
+        const found = await methodRecord(id);
+        if (found?.id) return found;
+      } catch (error) {
+        if (!(error instanceof HttpError) || error.status !== 404) throw error;
+      }
+    }
+    return null;
+  }
+
   /** The first PDF attached to a method row, base64 for Gemini's inline_data part. */
   async function documentPdf(record) {
     const attachment = findAttachments(record?.fields || {})[0];
@@ -1720,6 +1772,22 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
     const method = mapMethod(record, '');
     const context = documentContext(record.fields || {});
     const pdf = await documentPdf(record);
+    // The lab pairs an ISO method with its AATCC counterpart through a link column. When a pair is
+    // recorded, the counterpart's PDF travels with the question so the answer can compare them; an
+    // unpaired row simply answers from its own document, as before.
+    const counterpart = await counterpartRecord(record);
+    const counterpartMethod = counterpart ? mapMethod(counterpart, '') : null;
+    const counterpartContext = counterpart ? documentContext(counterpart.fields || {}) : '';
+    let counterpartPdf = counterpart ? await documentPdf(counterpart) : null;
+    if (
+      pdf &&
+      counterpartPdf &&
+      pdf.data.length + counterpartPdf.data.length > DOCUMENT_PAIR_MAX_BASE64
+    ) {
+      // Both files would not fit one inline request: keep the one being read and compare against
+      // the counterpart's recorded details instead of its PDF.
+      counterpartPdf = null;
+    }
     const instruction = pdf
       ? "The method's full PDF is attached to the final question. Treat its text as the source " +
         'of truth: quote clause numbers, limits and tolerances only as they appear in that PDF, ' +
@@ -1727,18 +1795,41 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
       : "The method's PDF could not be read for this request, so only the recorded details below " +
         'are available. Say plainly when a question needs the full document, and never invent ' +
         'clause numbers, limits or tolerances.';
+    const comparison = counterpart
+      ? ` The library pairs this method with a counterpart in the other standard: ${counterpartMethod.title}` +
+        (counterpartPdf ? ' (its PDF is attached as well)' : ' (only its recorded details are available)') +
+        '. When the member asks to compare them, or when the counterpart makes the answer clearer,' +
+        ' compare the two on scope, specimen, procedure, limits/tolerances and reporting, and name' +
+        ' the method each value comes from. Never call the two equivalent unless the documents say' +
+        ' so; the pair is a library link, not proof of equivalence.'
+      : '';
     const system =
       'You answer questions about one textile test method for a member of the TexLab app. ' +
       instruction +
+      comparison +
       ' Be concise and practical, and answer in the language of the question.\n\n' +
       `Document: ${method.title}` +
       (method.name && method.name !== method.title ? ` — ${method.name}` : '') +
       '\n' +
-      (context || 'No further details were recorded for this method.');
+      (context || 'No further details were recorded for this method.') +
+      (counterpart
+        ? `\n\nCounterpart in the library: ${counterpartMethod.title}` +
+          (counterpartMethod.name && counterpartMethod.name !== counterpartMethod.title
+            ? ` — ${counterpartMethod.name}`
+            : '') +
+          '\n' +
+          (counterpartContext || 'No further details were recorded for this counterpart.')
+        : '');
 
     const questionParts = [];
     if (pdf) {
       questionParts.push({ inline_data: { mime_type: 'application/pdf', data: pdf.data } });
+    }
+    if (counterpartPdf) {
+      questionParts.push({ text: `Counterpart method document: ${counterpartMethod.title}` });
+      questionParts.push({
+        inline_data: { mime_type: 'application/pdf', data: counterpartPdf.data },
+      });
     }
     questionParts.push({ text: question });
     const contents = [
@@ -1810,6 +1901,14 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
           model: config.geminiModel,
           methodId: recordId,
           groundedIn: pdf ? 'pdf' : 'metadata',
+          comparison: counterpart
+            ? {
+                methodId: String(counterpart.id || ''),
+                title: counterpartMethod.title,
+                name: counterpartMethod.name || null,
+                groundedIn: counterpartPdf ? 'pdf' : 'metadata',
+              }
+            : null,
           usage: quota.summary,
         },
         quotaHeaders(membership.level, quota.summary),

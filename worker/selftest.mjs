@@ -50,6 +50,8 @@ const ISO_RECORD = {
     'Method Name': 'Quantitative chemical analysis',
     Scope: 'Determination of cellulose fibre mixtures.',
     Version: '2019',
+    // The lab paired this ISO method with an AATCC counterpart (Airtable `AATCC` link column).
+    AATCC: ['recCCCCCCCCCCCCCC'],
     File: [
       {
         id: 'attPDF00000000001',
@@ -62,7 +64,45 @@ const ISO_RECORD = {
   },
 };
 
+/** The counterpart of ISO_RECORD, with its own PDF, and linked back to it. */
+const AATCC_RECORD = {
+  id: 'recCCCCCCCCCCCCCC',
+  fields: {
+    Method: 'AATCC TM20A',
+    'Method Name': 'Fiber Analysis: Quantitative',
+    Scope: 'Quantitative fibre analysis by chemical dissolution.',
+    Version: '2021',
+    'ISO Counterpart': ['recAAAAAAAAAAAAAA'],
+    File: [
+      {
+        id: 'attPDF00000000002',
+        url: 'PENDING_AATCC_URL',
+        filename: 'AATCC-TM20A-2021.pdf',
+        size: 39,
+        type: 'application/pdf',
+      },
+    ],
+  },
+};
+
+/** A method the lab has not paired, so Ask AI answers from its own document only. */
+const UNPAIRED_RECORD = {
+  id: 'recBBBBBBBBBBBBBB',
+  fields: {
+    Method: 'ISO 2062',
+    'Method Name': 'Yarns from packages',
+    Scope: 'Single-end breaking force.',
+    AATCC: [],
+  },
+};
+
 const PDF_BYTES = Buffer.from('%PDF-1.4\n% worker selftest\n');
+const AATCC_PDF_BYTES = Buffer.from('%PDF-1.4\n% aatcc counterpart selftest\n');
+const METHODS_BY_ID = new Map([
+  [ISO_RECORD.id, ISO_RECORD],
+  [AATCC_RECORD.id, AATCC_RECORD],
+  [UNPAIRED_RECORD.id, UNPAIRED_RECORD],
+]);
 
 // ---------------------------------------------------------------------------
 // Stub upstream: Airtable API (read + write) + Google JWKS + the attachment CDN
@@ -124,6 +164,10 @@ const stub = http.createServer((req, res) => {
   if (url.pathname === '/iso-1833-17.pdf') {
     res.writeHead(200, { 'Content-Type': 'application/pdf' });
     return res.end(PDF_BYTES);
+  }
+  if (url.pathname === '/aatcc-tm20a.pdf') {
+    res.writeHead(200, { 'Content-Type': 'application/pdf' });
+    return res.end(AATCC_PDF_BYTES);
   }
 
   if (url.pathname.startsWith('/gemini/models/')) {
@@ -216,7 +260,10 @@ const stub = http.createServer((req, res) => {
     return send(200, { records: [members.get(email)] });
   }
 
-  if (recordId) return send(200, ISO_RECORD);
+  if (recordId) {
+    const method = METHODS_BY_ID.get(recordId);
+    return method ? send(200, method) : send(404, { error: { type: 'NOT_FOUND' } });
+  }
   if (table === 'ISO') return send(200, { records: [ISO_RECORD] });
   return send(200, { records: [] });
 });
@@ -224,6 +271,7 @@ const stub = http.createServer((req, res) => {
 await new Promise((resolve) => stub.listen(0, '127.0.0.1', resolve));
 const origin = `http://127.0.0.1:${stub.address().port}`;
 ISO_RECORD.fields.File[0].url = `${origin}/iso-1833-17.pdf`;
+AATCC_RECORD.fields.File[0].url = `${origin}/aatcc-tm20a.pdf`;
 
 const env = {
   AIRTABLE_TOKEN: 'test-airtable-token',
@@ -795,6 +843,24 @@ await check('a member asks about one document and gets a grounded answer', async
   assert.ok(sent.body.system_instruction.parts[0].text.includes('ISO 1833-17'));
   assert.ok(sent.body.system_instruction.parts[0].text.includes('Determination of cellulose fibre mixtures.'));
   assert.ok(sent.body.system_instruction.parts[0].text.includes('full PDF is attached'));
+  assert.ok(
+    sent.body.system_instruction.parts[0].text.includes('counterpart in the other standard: AATCC TM20A'),
+    'the paired method must be described to the model',
+  );
+  assert.ok(
+    sent.body.system_instruction.parts[0].text.includes('Quantitative fibre analysis by chemical dissolution.'),
+    "the counterpart's recorded details must be in the prompt",
+  );
+  assert.deepEqual(
+    body.comparison,
+    {
+      methodId: 'recCCCCCCCCCCCCCC',
+      title: 'AATCC TM20A',
+      name: 'Fiber Analysis: Quantitative',
+      groundedIn: 'pdf',
+    },
+    'the response must name the counterpart it compared against',
+  );
   assert.deepEqual(
     sent.body.contents.slice(0, -1).map((entry) => [entry.role, entry.parts[0].text]),
     [
@@ -810,8 +876,33 @@ await check('a member asks about one document and gets a grounded answer', async
     Buffer.from(PDF_BYTES).toString('base64'),
     'the method PDF must be sent as inline data',
   );
-  assert.equal(question.parts[1].text, 'What fibre mixtures does this cover?');
+  assert.equal(question.parts[1].text, 'Counterpart method document: AATCC TM20A');
+  assert.equal(question.parts[2].inline_data.mime_type, 'application/pdf');
+  assert.equal(
+    question.parts[2].inline_data.data,
+    Buffer.from(AATCC_PDF_BYTES).toString('base64'),
+    "the counterpart's PDF must be sent so the two can be compared",
+  );
+  assert.equal(question.parts[3].text, 'What fibre mixtures does this cover?');
   assert.ok(!JSON.stringify(body).includes('test-gemini-key'), 'the key must never be returned');
+});
+
+await check('a method with no paired counterpart answers from its own document alone', async () => {
+  const { status, body } = await call('/api/documents/ask', {
+    token: mintToken({ email: 'pro@example.com' }),
+    method: 'POST',
+    body: { methodId: 'recBBBBBBBBBBBBBB', question: 'Does this method have an AATCC twin?' },
+  });
+  assert.equal(status, 200, JSON.stringify(body));
+  assert.equal(body.comparison, null, 'no pair means no comparison claim');
+  const sent = geminiCalls.at(-1);
+  const question = sent.body.contents.at(-1);
+  assert.equal(question.parts.length, 1, 'only the question is sent when no PDF can be read');
+  assert.equal(question.parts[0].text, 'Does this method have an AATCC twin?');
+  assert.ok(
+    !sent.body.system_instruction.parts[0].text.includes('Counterpart in the library'),
+    'an unpaired method must not be given a counterpart section',
+  );
 });
 
 await check('the daily Ask AI allowance is charged, then refuses further questions', async () => {

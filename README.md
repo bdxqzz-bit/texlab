@@ -153,7 +153,7 @@ is `Admin`, `Administrator`, `Owner` or `Manager`):
 | Endpoint | Purpose |
 | --- | --- |
 | `POST /api/messages` | `{kind, subject, message, appVersion, device}` — stores one report or request from the signed-in member in the Messages table |
-| `POST /api/documents/ask` | `{methodId, question, history}` — answers a question about that method with Gemini, grounded in its attached PDF |
+| `POST /api/documents/ask` | `{methodId, question, history}` — answers a question about that method with Gemini, grounded in its attached PDF and, when paired, its counterpart's PDF; returns `groundedIn`, `comparison` and the day's `usage` |
 | `GET /api/notifications/me` | The signed-in member's own push state (token shown as a short preview) |
 | `POST /api/notifications/register` | `{token, appId}` — stores this device on the member's row |
 | `POST /api/notifications/unregister` | Clears the device from the row (switch off / sign out) |
@@ -188,6 +188,16 @@ app holds no AI credential and the answer is never stored. Without the key the r
 cd worker
 npx wrangler secret put GEMINI_API_KEY     # a Google AI Studio key from https://aistudio.google.com/apikey
 ```
+
+**Comparing the counterpart method.** When a method row links its counterpart in the other
+standard — the `AATCC` column on the ISO table or `ISO Counterpart` on the AATCC table — the Worker
+reads that record too and attaches its **PDF**, so a question like "how does this differ from
+AATCC TM8?" is answered by comparing the two documents, naming the method each limit comes from.
+A row the lab has not paired answers from its own document only, and the response's `comparison`
+field is `null`. The pair is a library link, not a claim of equivalence: the prompt tells the model
+not to call the methods equivalent unless the documents say so. Both files share one inline
+request, so a counterpart is compared from its recorded details when the two PDFs together exceed
+`DOCUMENT_PAIR_MAX_BASE64` (18 MB).
 
 `GEMINI_MODEL` (default `gemini-3.1-flash-lite`) picks the model; older flash models such as
 `gemini-2.5-flash` are retired for new API keys. Only the last eight chat turns are
