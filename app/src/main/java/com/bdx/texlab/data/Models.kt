@@ -176,11 +176,15 @@ data class AdminMember(
     /** False only when the Status column names something that does not grant access. */
     val active: Boolean get() = memberStatus == MemberStatus.ACTIVE
     val statusLabel: String get() = status.takeIf { it.isNotBlank() } ?: MemberStatus.ACTIVE.label
-    /** "Active now" (with the green dot), or how long ago this member last used the app. */
-    val presenceLabel: String
+    /**
+     * The console's presence line: "Active now" for the member using the app right now, otherwise
+     * how long ago they were last seen. Null for a member who never has been, so their row is not
+     * padded with a line that says nothing.
+     */
+    val lastSeenLabel: String?
         get() = when {
             online -> "Active now"
-            lastActiveAt.isBlank() -> "Not active yet"
+            lastActiveAt.isBlank() -> null
             else -> "Last active ${relativeTime(lastActiveAt)}"
         }
 }

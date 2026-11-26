@@ -1237,34 +1237,34 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
   const geminiGate = createRateGate({ limit: config.geminiRpm, now });
   const askingMembers = new Set();
   const pdfCache = new Map();
-  // email -> ms of the last "Last active" write this isolate made, so ordinary browsing does not
-  // spend an Airtable write per request.
-  const lastActiveWrites = new Map();
 
   /**
-   * Stamps the member's row with the current time for the admin console's presence view. A failed
-   * write (a read-only token, for instance) is logged and ignored: it must never fail the request
-   * the member actually made.
+   * Records that the member just used the app, for the admin console's presence line. The stored
+   * cell is the clock: a write is skipped while it already holds a time inside
+   * LAST_ACTIVE_WRITE_MS, so the throttle holds for every isolate instead of one in-memory timer
+   * per isolate. The write runs after the response has gone out (`ctx.waitUntil`) and a failure —
+   * a read-only token, say — is logged, never returned to the member.
    */
-  async function touchLastActive(recordId, email) {
-    const key = String(email || '').trim().toLowerCase();
-    if (!recordId || !key) return;
+  async function recordActivity(activity, ctx) {
+    if (!activity?.recordId) return;
     const at = now();
-    if (at - (lastActiveWrites.get(key) || 0) < LAST_ACTIVE_WRITE_MS) return;
-    lastActiveWrites.set(key, at);
-    try {
-      await airtableWrite({
-        config,
-        table: config.membersTable,
-        recordId,
-        fields: { [LAST_ACTIVE_FIELD]: new Date(at).toISOString() },
-        fetchImpl,
-        throttle: createThrottle(),
-      });
-    } catch (error) {
-      lastActiveWrites.delete(key);
+    if (at - activity.lastActiveMs < LAST_ACTIVE_WRITE_MS) return;
+    activity.lastActiveMs = at; // also holds off a second write while this one is in flight
+    const write = airtableWrite({
+      config,
+      table: config.membersTable,
+      recordId: activity.recordId,
+      fields: { [LAST_ACTIVE_FIELD]: new Date(at).toISOString() },
+      fetchImpl,
+      throttle: createThrottle(),
+    }).catch((error) => {
+      // Keep the timestamp: a token without write access would otherwise retry, and log, on
+      // every single request. The next attempt comes after the window.
       console.warn('[proxy] last active not recorded:', error?.message || error);
-    }
+    });
+    // Without an execution context (the self-test) waiting keeps behaviour observable.
+    if (ctx?.waitUntil) ctx.waitUntil(write);
+    else await write;
   }
 
   async function membershipFor(identity) {
@@ -1293,7 +1293,17 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
           ? { member: false, level: null, levelLabel: null, name: null, role: 'Member', reason: 'inactive' }
           : membershipValue(await joinAsBasic({ config, identity, fetchImpl }), identity);
 
-    const entry = { expiresAt: now() + config.membershipTtlMs, value, recordId };
+    // The row's own "Last active" value, so recordActivity can leave a cell that already says
+    // "just now" alone. A member who just joined has none yet, hence 0.
+    const storedLastActive = active
+      ? Date.parse(firstString(active.fields, [LAST_ACTIVE_FIELD]))
+      : NaN;
+    const entry = {
+      expiresAt: now() + config.membershipTtlMs,
+      value,
+      recordId,
+      lastActiveMs: Number.isFinite(storedLastActive) ? storedLastActive : 0,
+    };
     membershipCache.set(email, entry);
     return entry;
   }
@@ -2170,7 +2180,7 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
         'This membership is not active. An administrator must set Status to Active in the Members table.',
       );
     }
-    return { identity, membership: entry.value, recordId: entry.recordId };
+    return { identity, membership: entry.value, recordId: entry.recordId, activity: entry };
   }
 
   /**
@@ -2189,7 +2199,7 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
     return { identity, membership, recordId };
   }
 
-  async function route(request) {
+  async function route(request, ctx) {
     const url = new URL(request.url);
     const method = request.method || 'GET';
 
@@ -2243,8 +2253,8 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
       if (method !== 'GET' && method !== 'HEAD') {
         throw new HttpError(405, 'method_not_allowed', 'Only GET and HEAD are supported.');
       }
-      const { identity, membership, recordId } = await requireMember(request);
-      await touchLastActive(recordId, identity.email);
+      const { membership, recordId, activity } = await requireMember(request);
+      await recordActivity(activity, ctx);
       const usage = await usageFor(recordId, membership.level);
       return jsonResponse(200, { ...membership, usage }, { Vary: 'Authorization' });
     }
@@ -2312,8 +2322,8 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
       if (method !== 'GET' && method !== 'HEAD') {
         throw new HttpError(405, 'method_not_allowed', 'Only GET and HEAD are supported.');
       }
-      const { identity, recordId } = await requireMember(request);
-      await touchLastActive(recordId, identity.email);
+      const { activity } = await requireMember(request);
+      await recordActivity(activity, ctx);
       const records = [];
       for (const table of config.methodsTables) {
         const page = await airtableList({ config, table, fetchImpl, throttle: createThrottle() });
@@ -2410,9 +2420,9 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
     return new Response(response.body, { status: response.status, headers });
   }
 
-  return async function handle(request) {
+  return async function handle(request, ctx) {
     try {
-      return withAdminCors(request, await route(request));
+      return withAdminCors(request, await route(request, ctx));
     } catch (error) {
       return withAdminCors(request, errorResponse(error));
     }
@@ -2451,7 +2461,7 @@ let cachedProxy = null;
 let cachedProxyKey = '';
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     try {
       const config = readConfig(env);
       const key = `${config.baseId}|${config.jwksUrl}|${config.projectId}`;
@@ -2459,7 +2469,7 @@ export default {
         cachedProxy = createProxy({ env });
         cachedProxyKey = key;
       }
-      return await cachedProxy(request);
+      return await cachedProxy(request, ctx);
     } catch (error) {
       return errorResponse(error);
     }

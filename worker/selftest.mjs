@@ -799,6 +799,32 @@ await check('the admin console shows who is active and when the rest were last s
     active.lastActiveAt,
     'the Worker must record activity on the member row',
   );
+
+  // A second request inside the write window must not spend another Airtable write.
+  await request('/api/me', memberToken);
+  assert.equal(
+    members.get('member@example.com').fields['Last active'],
+    active.lastActiveAt,
+    'activity must not be rewritten on every request',
+  );
+});
+
+await check('recording activity is handed to the execution context', async () => {
+  const stale = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+  members.get('member@example.com').fields['Last active'] = stale;
+  const scheduled = [];
+  const response = await handle(
+    new Request(`${base}/api/me`, { headers: { Authorization: `Bearer ${memberToken}` } }),
+    { waitUntil: (promise) => scheduled.push(promise) },
+  );
+  assert.equal(response.status, 200);
+  assert.equal(scheduled.length, 1, 'the presence write goes through waitUntil');
+  await Promise.all(scheduled);
+  assert.notEqual(
+    members.get('member@example.com').fields['Last active'],
+    stale,
+    'the deferred write still lands on the row',
+  );
 });
 
 await check('a member sends an in-app report that lands in the Messages table', async () => {

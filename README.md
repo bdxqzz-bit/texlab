@@ -263,9 +263,11 @@ missing, `POST /api/messages` answers `502 airtable_error` naming the table.
 daily counters `Usage date` (single line text, `YYYY-MM-DD`), `Views today` and
 `Downloads today` (numbers). Without the three counter columns PDFs fail closed with
 `502 quota_store_error`, because the allowance cannot be recorded. `Last active` (single line
-text, ISO UTC) is written by the Worker on `/api/me` and `/api/methods`, at most once every two
-minutes per member, and read for the console's presence line: the green dot means a request in
-the last five minutes, otherwise the list shows how long ago the member was last seen.
+  text, ISO UTC) is written by the Worker on `/api/me` and `/api/methods`. A write is skipped while
+  the cell already holds a time inside two minutes, and it is sent after the response has gone out,
+  so opening the app never waits on it. The console reads it for its presence line: the green dot
+  means a request in the last five minutes, otherwise the row shows how long ago the member was
+  last seen (nothing at all for a member who never has been).
 Rows are created automatically on first sign-in as Basic with the Google name and photo; raise a
 member by setting `Level` to `Pro` or `Max`. Active values: `Active`, `Approved`, `Member`,
 `Paid`, `Yes`, `1`, `True`, `Current`, `Enabled`. A row without a `Status` column counts as

@@ -490,25 +490,28 @@ private fun MemberRow(
                 overflow = TextOverflow.Ellipsis,
             )
             // Presence: a green dot while the member is using the app, otherwise when they were
-            // last seen (the Worker records it on each member request).
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                if (member.online) {
-                    Box(
-                        modifier = Modifier
-                            .size(8.dp)
-                            .background(activeColor, CircleShape),
+            // last seen (the Worker records it on each member request). A member who never has
+            // been gets no line at all.
+            member.lastSeenLabel?.let { label ->
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    if (member.online) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .background(activeColor, CircleShape),
+                        )
+                    }
+                    Text(
+                        text = label,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (member.online) activeColor else MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
-                Text(
-                    text = member.presenceLabel,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (member.online) activeColor else MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
             }
         }
         Column(horizontalAlignment = Alignment.End) {
