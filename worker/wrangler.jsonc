@@ -21,10 +21,10 @@
     // In-app updates: what GET /api/app/latest tells installed apps. Publish a new build, then
     // raise APP_VERSION_CODE and set APP_APK_URL to the signed APK's public https URL. Raise
     // APP_MIN_SUPPORTED to the new versionCode to force older installs to update.
-    "APP_VERSION_CODE": "7",
-    "APP_VERSION_NAME": "1.15",
+    "APP_VERSION_CODE": "8",
+    "APP_VERSION_NAME": "1.16",
     "APP_MIN_SUPPORTED": "1",
-    "APP_APK_URL": "https://github.com/bdxqzz-bit/texlab/releases/download/v1.15/app-release.apk",
-    "APP_RELEASE_NOTES": "The admin console member list now shows a green dot while a member is active and how long ago everyone else was last seen."
+    "APP_APK_URL": "https://github.com/bdxqzz-bit/texlab/releases/download/v1.16/app-release.apk",
+    "APP_RELEASE_NOTES": "New launcher icon: a woven cloth swatch under a magnifier, with a molecule and a thread spool. The admin console records who is active without making anyone wait for it."
   }
 }
