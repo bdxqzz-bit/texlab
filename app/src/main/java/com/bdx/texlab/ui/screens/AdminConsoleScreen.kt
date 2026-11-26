@@ -21,6 +21,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Campaign
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Button
@@ -52,6 +53,7 @@ import com.bdx.texlab.data.AdminMember
 import com.bdx.texlab.data.AdminTarget
 import com.bdx.texlab.data.MemberMessage
 import com.bdx.texlab.data.MembershipLevel
+import com.bdx.texlab.data.MethodUpload
 import com.bdx.texlab.ui.AdminUiState
 import com.bdx.texlab.ui.AppUiState
 
@@ -75,6 +77,8 @@ fun AdminConsoleScreen(
     onLevelChange: (MembershipLevel) -> Unit,
     onSend: () -> Unit,
     onOpenMember: (String) -> Unit,
+    onRefreshUploads: () -> Unit,
+    onOpenUpload: (String) -> Unit,
 ) {
     if (!state.isAdmin) {
         // Never render the console for a member role, even if the route is somehow reached.
@@ -227,6 +231,66 @@ fun AdminConsoleScreen(
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Text(
+                        text = "Method uploads",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        text = if (admin.uploads.isEmpty()) {
+                            "Methods and documents members submit for review appear here."
+                        } else {
+                            "${admin.uploads.size} submitted \u00b7 " +
+                                "${admin.uploads.count { it.pending }} waiting \u00b7 tap one to read it " +
+                                "with AI, then approve or reject"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    TextButton(onClick = onRefreshUploads) { Text("Reload uploads") }
+                }
+            }
+
+            if (admin.uploadsLoading) {
+                item { LinearProgressIndicator(modifier = Modifier.fillMaxWidth()) }
+            }
+
+            admin.uploadsError?.let { problem ->
+                item {
+                    Text(
+                        text = problem,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+
+            admin.uploadNotice?.let { notice ->
+                item {
+                    Text(
+                        text = notice,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+            }
+
+            if (admin.uploads.isEmpty() && !admin.uploadsLoading && admin.uploadsError == null) {
+                item {
+                    Text(
+                        text = "No method has been submitted yet.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+
+            items(admin.uploads, key = { upload -> "upload-" + upload.id }) { upload ->
+                UploadCard(upload = upload, onOpen = { onOpenUpload(upload.id) })
+            }
+
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
                         text = "Member messages",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.SemiBold,
@@ -323,6 +387,102 @@ fun AdminConsoleScreen(
                     onOpen = { onOpenMember(member.id.ifBlank { member.email }) },
                 )
             }
+        }
+    }
+}
+
+/** One submitted method in the console list: who sent it, what the file is, and its state. */
+@Composable
+private fun UploadCard(upload: MethodUpload, onOpen: () -> Unit) {
+    Card(
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onOpen),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(6.dp),
+                    color = when {
+                        upload.rewarded -> MaterialTheme.colorScheme.primaryContainer
+                        upload.rejected -> MaterialTheme.colorScheme.errorContainer
+                        upload.pending -> MaterialTheme.colorScheme.secondaryContainer
+                        else -> MaterialTheme.colorScheme.tertiaryContainer
+                    },
+                    contentColor = when {
+                        upload.rewarded -> MaterialTheme.colorScheme.onPrimaryContainer
+                        upload.rejected -> MaterialTheme.colorScheme.onErrorContainer
+                        upload.pending -> MaterialTheme.colorScheme.onSecondaryContainer
+                        else -> MaterialTheme.colorScheme.onTertiaryContainer
+                    },
+                ) {
+                    Text(
+                        text = upload.statusLabel,
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                    )
+                }
+                if (upload.methodName.isNotBlank()) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.AutoAwesome,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(14.dp),
+                        )
+                        Text(
+                            text = "AI reviewed",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                }
+                if (upload.dateLabel.isNotBlank()) {
+                    Text(
+                        text = upload.dateLabel,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            Text(
+                text = upload.headline,
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (upload.scope.isNotBlank()) {
+                Text(
+                    text = upload.scope,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Text(
+                text = buildString {
+                    append(upload.displayName)
+                    if (upload.email.isNotBlank()) append(" \u00b7 ${upload.email}")
+                    if (upload.fileName.isNotBlank()) append(" \u00b7 ${upload.fileName}")
+                    if (upload.days > 0) append(" \u00b7 ${upload.days} days")
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }

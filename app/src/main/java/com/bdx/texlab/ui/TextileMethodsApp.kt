@@ -20,6 +20,7 @@ import com.bdx.texlab.push.NotificationHistory
 import com.bdx.texlab.ui.screens.AboutScreen
 import com.bdx.texlab.ui.screens.AdminConsoleScreen
 import com.bdx.texlab.ui.screens.AdminMemberSheet
+import com.bdx.texlab.ui.screens.MethodUploadSheet
 import com.bdx.texlab.ui.screens.ContactAdminScreen
 import com.bdx.texlab.ui.screens.HomeScreen
 import com.bdx.texlab.ui.screens.InviteDialog
@@ -153,6 +154,7 @@ private fun MemberArea(state: AppUiState, viewModel: AppViewModel) {
             LaunchedEffect(Unit) {
                 viewModel.loadAdminMembers()
                 viewModel.loadAdminMessages()
+                viewModel.loadAdminUploads()
             }
             AdminConsoleScreen(
                 state = state,
@@ -160,6 +162,7 @@ private fun MemberArea(state: AppUiState, viewModel: AppViewModel) {
                 onRefresh = {
                     viewModel.loadAdminMembers()
                     viewModel.loadAdminMessages()
+                    viewModel.loadAdminUploads()
                 },
                 onToggleMember = viewModel::toggleAdminMember,
                 onSelectReachable = viewModel::selectReachableAdminMembers,
@@ -170,6 +173,8 @@ private fun MemberArea(state: AppUiState, viewModel: AppViewModel) {
                 onLevelChange = viewModel::setAdminLevel,
                 onSend = viewModel::sendAdminNotification,
                 onOpenMember = viewModel::openAdminMember,
+                onRefreshUploads = viewModel::loadAdminUploads,
+                onOpenUpload = viewModel::openAdminUpload,
             )
 
             // The member detail sheet sits above the console: tap a row to open it.
@@ -188,6 +193,33 @@ private fun MemberArea(state: AppUiState, viewModel: AppViewModel) {
                     onStatusChange = viewModel::setAdminDraftStatus,
                     onSave = viewModel::saveAdminMember,
                     onDismiss = viewModel::closeAdminMember,
+                )
+            }
+
+            // The upload review sheet: read the file with Gemini, then approve or reject it.
+            admin.openUpload?.let { upload ->
+                MethodUploadSheet(
+                    upload = upload,
+                    methodName = admin.draftUploadMethodName,
+                    scope = admin.draftUploadScope,
+                    standard = admin.draftUploadStandard,
+                    table = admin.draftUploadTable,
+                    tables = admin.uploadTables.ifEmpty { listOf("ISO", "AATCC") },
+                    days = admin.draftUploadDays,
+                    publish = admin.draftUploadPublish,
+                    assistant = admin.uploadsAssistant,
+                    analysing = admin.analysingUpload,
+                    reviewing = admin.reviewingUpload,
+                    error = admin.uploadError,
+                    onMethodNameChange = viewModel::setAdminUploadMethodName,
+                    onScopeChange = viewModel::setAdminUploadScope,
+                    onTableChange = viewModel::setAdminUploadTable,
+                    onDaysChange = viewModel::setAdminUploadDays,
+                    onPublishChange = viewModel::setAdminUploadPublish,
+                    onAnalyse = viewModel::analyseAdminUpload,
+                    onApprove = viewModel::approveAdminUpload,
+                    onReject = viewModel::rejectAdminUpload,
+                    onDismiss = viewModel::closeAdminUpload,
                 )
             }
         }

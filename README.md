@@ -180,6 +180,9 @@ is `Admin`, `Administrator`, `Owner` or `Manager`):
 | `GET /api/admin/messages` | The member inbox: reports and requests sent from the app, newest first |
 | `GET /api/admin/members` | Member list with level, role, status, push state, today's usage and presence (`online` + `lastActiveAt`: the console shows a green dot while active and "last active …" otherwise) |
 | `POST /api/admin/members/{recordId}/push-token`, `DELETE …` | Sets or clears one member's device token |
+| `GET /api/admin/uploads` | The uploads table, newest first, with the member, file details and AI columns, plus `assistant` (Gemini configured?) and `tables` (`ISO`, `AATCC`) |
+| `POST /api/admin/uploads/{recordId}/analyse` | Reads the attached document with Gemini and writes `Method name`, `Scope` and `Standard` onto the row; answers `503 gemini_not_configured` without `GEMINI_API_KEY` |
+| `POST /api/admin/uploads/{recordId}/review` | `{decision: "approve", days, methodName, scope, standard, table, publish, note}` adds 1–30 Pro days and, with `publish`, copies the method into `table`; `{decision: "reject", note}` closes the row. `409 already_rewarded` refuses a second payout |
 | `GET /api/admin/notify` | Whether push is configured on the Worker |
 | `POST /api/admin/notify` | `{title, body, targetMode, targetLevel, suppressedEmails}` — sends one push per reachable device |
 
@@ -217,12 +220,33 @@ email and attaches the file through Airtable's content API. Create a table named
 | `Submitted at` | Date/time (ISO text) | the Worker |
 | `Days` | Number | an administrator, 1–30 when approving |
 | `Pro until` | Single line text | the Worker, the end of the trial it granted |
+| `Method name` | Single line text | the AI review (or the administrator), saved before publishing |
+| `Scope` | Long text | the AI review (or the administrator): what the method covers and for which materials |
+| `Standard` | Single line text | the AI review: `ISO`, `AATCC` or `Other` |
+| `Published in` | Single line text | the Worker: `<table>/<recordId>` of the method row it copied |
+| `Review note` | Long text | the administrator's rejection reason, or the console's approval note |
 
 An administrator reviews a `Pending` row in Airtable and sets `Status` to `Approved` with `Days`
 between 1 and 30 (or `Rejected`). The member's next request adds those days to their Pro trial, marks
 the row `Rewarded` and fills `Pro until`; the trial is a KV overlay like an invite trial, so the
 `Members` row's `Level` stays admin-owned. Days are added once per row, and rows without `Days` are
 left alone.
+
+**Reviewing uploads in the app.** The admin console has a **Method uploads** section that lists the
+same rows newest first, with their status, member, file and any AI result. Tapping one opens a review
+sheet. **Analyse with AI** asks `POST /api/admin/uploads/{id}/analyse`: the Worker streams the
+attached PDF (or image, or text) to Gemini with a JSON-only prompt and stores `Method name`, `Scope`
+and `Standard` on the row, so Airtable and the console show the same text. The administrator can edit
+the name and scope before approving.
+
+Approving with **Add the method to the library** copies the method into the chosen table (`ISO` or
+`AATCC`) *before* any approval write, so a failed copy leaves the upload untouched. The new row gets
+`Method` = the method name, `Method Name` = the member's submitted title, `Scope`, and the file,
+re-uploaded through Airtable's content API; `Published in` records where it went, `ISO`/`AATCC`
+counterpart links are left empty for editing. The approval then writes `Status` = `Approved` and
+`Days`, and the member's next request pays the trial as above (once, `Rewarded`). **Reject** writes
+`Status` = `Rejected` plus the note and grants nothing. Analysis needs the `GEMINI_API_KEY` secret;
+the console says so and still allows a manual review when it is missing.
 
 **Ask AI on a document.** Every method's detail screen has an **Ask AI** button. It opens a chat
 about that method only: the question goes to `POST /api/documents/ask` with the method's record

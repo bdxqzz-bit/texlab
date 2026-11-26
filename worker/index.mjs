@@ -279,6 +279,15 @@ export const UPLOAD_FIELDS = {
   submittedAt: 'Submitted at',
   days: 'Days',
   proUntil: 'Pro until',
+  reviewNote: 'Review note',
+  // Filled by the admin console's AI review: the method's own designation, what it covers, and
+  // the standard it belongs to (ISO / AATCC). Kept on the row so Airtable shows the same values
+  // the console does.
+  methodName: 'Method name',
+  scope: 'Scope',
+  standard: 'Standard',
+  // `<table>/<recordId>` once an approved upload was copied into the method library.
+  publishedIn: 'Published in',
 };
 
 /** A new upload starts here; an admin moves it to `Approved` (with Days) or `Rejected`. */
@@ -346,6 +355,36 @@ export function documentContext(fields = {}, limit = 6000) {
  * a string is dropped, consecutive turns from the same side are merged, and only the most recent
  * turns are kept, so a client cannot replay an unbounded history.
  */
+/**
+ * Reads the JSON an AI review returns, tolerating a code fence or a sentence around it, and caps
+ * every field so one surprising answer cannot write a huge value into Airtable.
+ */
+export function parseUploadAnalysis(text) {
+  const clean = (value, max) =>
+    String(value ?? '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, max);
+  const raw = String(text || '').trim();
+  const unfenced = raw.replace(/^```(?:json)?\s*/i, '').replace(/```$/, '').trim();
+  let body = {};
+  for (const candidate of [unfenced, unfenced.slice(unfenced.indexOf('{'), unfenced.lastIndexOf('}') + 1)]) {
+    if (!candidate) continue;
+    try {
+      body = JSON.parse(candidate);
+      break;
+    } catch {
+      // Try the next shape.
+    }
+  }
+  const standard = clean(body?.standard, 40);
+  return {
+    methodName: clean(body?.methodName ?? body?.method_name ?? body?.name, 150),
+    scope: clean(body?.scope, 2000),
+    standard: /^iso$/i.test(standard) ? 'ISO' : /^aatcc$/i.test(standard) ? 'AATCC' : standard,
+  };
+}
+
 export function sanitiseChatHistory(history, maxTurns = DOCUMENT_HISTORY_TURNS) {
   if (!Array.isArray(history)) return [];
   const turns = [];
@@ -1844,6 +1883,435 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
     return jsonResponse(200, { ok: true, member: row });
   }
 
+  /**
+   * One upload row as the admin console sees it. The file itself is never streamed through this
+   * endpoint: the console lists what was submitted and the AI review, and reviews the file in
+   * Airtable when a human wants to read the whole document.
+   */
+  function adminUploadRow(record) {
+    const fields = record?.fields || {};
+    const attachment = findAttachments(fields)[0] || null;
+    const numeric = (value) => (Number.isFinite(Number(value)) ? Number(value) : 0);
+    return {
+      id: String(record?.id || ''),
+      title: firstString(fields, [UPLOAD_FIELDS.title]),
+      email: firstString(fields, [UPLOAD_FIELDS.email]).toLowerCase(),
+      name: firstString(fields, [UPLOAD_FIELDS.name]),
+      status: firstString(fields, [UPLOAD_FIELDS.status]) || UPLOAD_NEW_STATUS,
+      submittedAt:
+        firstString(fields, [UPLOAD_FIELDS.submittedAt]) || String(record?.createdTime || ''),
+      days: numeric(firstString(fields, [UPLOAD_FIELDS.days])),
+      proUntil: firstString(fields, [UPLOAD_FIELDS.proUntil]),
+      reviewNote: firstString(fields, [UPLOAD_FIELDS.reviewNote]),
+      fileName:
+        firstString(fields, [UPLOAD_FIELDS.fileName]) || String(attachment?.filename || ''),
+      contentType:
+        firstString(fields, [UPLOAD_FIELDS.contentType]) || String(attachment?.type || ''),
+      size: numeric(firstString(fields, [UPLOAD_FIELDS.size])) || numeric(attachment?.size),
+      methodName: firstString(fields, [UPLOAD_FIELDS.methodName]),
+      scope: firstString(fields, [UPLOAD_FIELDS.scope]),
+      standard: firstString(fields, [UPLOAD_FIELDS.standard]),
+      publishedIn: firstString(fields, [UPLOAD_FIELDS.publishedIn]),
+    };
+  }
+
+  /**
+   * GET /api/admin/uploads lists the member submissions, newest first, so an administrator can
+   * review them from inside the app instead of opening Airtable.
+   */
+  async function adminUploads(request) {
+    await requireAdmin(request);
+    const records = await airtableList({
+      config,
+      table: config.uploadsTable,
+      filterByFormula: '',
+      maxRecords: 200,
+      fetchImpl,
+      throttle: createThrottle(),
+    });
+    const uploads = records
+      .map(adminUploadRow)
+      .filter((row) => row.id && (row.title || row.fileName))
+      .sort((a, b) => String(b.submittedAt).localeCompare(String(a.submittedAt)));
+    return jsonResponse(200, {
+      uploads,
+      total: uploads.length,
+      assistant: Boolean(config.geminiApiKey),
+      tables: config.methodsTables,
+      note: 'One row per submitted method. Approving adds Days of Pro and can publish the method into the library.',
+    });
+  }
+
+  /**
+   * POST /api/admin/uploads/:recordId/analyse reads the uploaded file with Gemini and writes back
+   * the method's name, scope and standard so the reviewer starts from a filled-in row.
+   *
+   * The model gets the file inline when it is a PDF or an image (the two formats Gemini reads),
+   * and otherwise works from the title and filename only, saying so in `groundedIn`. The result is
+   * stored on the uploads row, so the same values are visible in Airtable.
+   */
+  async function analyseUpload(request, recordId) {
+    await requireAdmin(request);
+    if (!/^rec[A-Za-z0-9]{14}$/.test(String(recordId || ''))) {
+      throw new HttpError(400, 'bad_request', 'A valid upload record id is required.');
+    }
+    if (!config.geminiApiKey) {
+      throw new HttpError(
+        503,
+        'gemini_not_configured',
+        'AI review is not configured: set the Worker secret GEMINI_API_KEY to a Google AI Studio key.',
+      );
+    }
+
+    const record = await airtableRecord({
+      config,
+      table: config.uploadsTable,
+      recordId,
+      fetchImpl,
+      throttle: createThrottle(),
+    });
+    const fields = record?.fields || {};
+    const title = firstString(fields, [UPLOAD_FIELDS.title]);
+    const attachment = findAttachments(fields)[0] || null;
+
+    const waitSeconds = geminiGate();
+    if (waitSeconds > 0) {
+      throw new HttpError(
+        429,
+        'assistant_busy',
+        `The assistant is busy right now. Try again in ${waitSeconds} seconds.`,
+        { headers: { 'Retry-After': String(waitSeconds) } },
+      );
+    }
+
+    const contentType = String(
+      firstString(fields, [UPLOAD_FIELDS.contentType]) || attachment?.type || '',
+    ).toLowerCase();
+    const parts = [];
+    let groundedIn = 'title';
+    if (attachment && (contentType === 'application/pdf' || contentType.startsWith('image/'))) {
+      const upstream = await fetchImpl(attachment.url);
+      if (!upstream.ok) {
+        throw new HttpError(
+          502,
+          'attachment_error',
+          `The uploaded file could not be read (HTTP ${upstream.status}).`,
+        );
+      }
+      const bytes = new Uint8Array(await upstream.arrayBuffer());
+      if (bytes.length > 0) {
+        parts.push({ inline_data: { mime_type: contentType, data: base64FromBytes(bytes) } });
+        groundedIn = 'file';
+      }
+    } else if (attachment && contentType === 'text/plain') {
+      const upstream = await fetchImpl(attachment.url);
+      if (upstream.ok) {
+        const text = (await upstream.text()).slice(0, 20000);
+        if (text.trim()) {
+          parts.push({ text: `Document text:\n${text}` });
+          groundedIn = 'text';
+        }
+      }
+    }
+
+    const system =
+      'You review a textile testing laboratory method document submitted to a method library. ' +
+      'Read it and reply with JSON only, shaped exactly like ' +
+      '{"methodName": "...", "scope": "...", "standard": "..."}. ' +
+      'methodName is the method designation as printed in the document (for example ' +
+      '"ISO 105-C06" or "AATCC TM61"); if the document has no designation, use a short descriptive ' +
+      'name. scope is one to three sentences describing what the method covers and which ' +
+      'materials or properties it applies to, taken from the document\'s scope section. standard is ' +
+      '"ISO", "AATCC" or "" when the document does not make it clear. Never invent a designation, ' +
+      'a clause number, a limit or a scope detail that the document does not contain; use an empty ' +
+      'string instead.';
+    const requestText =
+      `Submitted title: ${title || '(none)'}\n` +
+      `File name: ${firstString(fields, [UPLOAD_FIELDS.fileName]) || attachment?.filename || '(none)'}\n` +
+      `Content type: ${contentType || '(unknown)'}` +
+      (groundedIn === 'title'
+        ? '\nThe file itself could not be read, so work from the title and file name only and keep scope short.'
+        : '');
+    parts.push({ text: requestText });
+
+    const response = await fetchImpl(
+      `${config.geminiApiBase}/models/${encodeURIComponent(config.geminiModel)}:generateContent`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': config.geminiApiKey,
+        },
+        body: JSON.stringify({
+          system_instruction: { parts: [{ text: system }] },
+          contents: [{ role: 'user', parts }],
+          generationConfig: {
+            temperature: 0.1,
+            maxOutputTokens: 900,
+            responseMimeType: 'application/json',
+          },
+        }),
+      },
+    );
+    const raw = await response.text();
+    let body = {};
+    try {
+      body = JSON.parse(raw);
+    } catch {
+      body = {};
+    }
+    if (response.status === 429) {
+      throw new HttpError(429, 'assistant_busy', 'The AI service is busy right now. Try again in a minute.', {
+        headers: { 'Retry-After': '60' },
+      });
+    }
+    if (!response.ok) {
+      const detail = String(body?.error?.message || '').slice(0, 300);
+      throw new HttpError(
+        502,
+        'gemini_error',
+        detail ? `The file could not be analysed: ${detail}` : `The file could not be analysed (HTTP ${response.status}).`,
+      );
+    }
+
+    const answer = (body?.candidates?.[0]?.content?.parts || [])
+      .filter((part) => part && typeof part.text === 'string' && !part.thought)
+      .map((part) => part.text)
+      .join('')
+      .trim();
+    const analysis = parseUploadAnalysis(answer);
+    if (!analysis.methodName && !analysis.scope) {
+      throw new HttpError(502, 'gemini_empty', 'The AI review returned nothing usable. Try again.');
+    }
+
+    await airtableWrite({
+      config,
+      table: config.uploadsTable,
+      recordId,
+      fields: {
+        [UPLOAD_FIELDS.methodName]: analysis.methodName,
+        [UPLOAD_FIELDS.scope]: analysis.scope,
+        [UPLOAD_FIELDS.standard]: analysis.standard,
+      },
+      fetchImpl,
+      throttle: createThrottle(),
+    });
+
+    return jsonResponse(200, {
+      ok: true,
+      ...analysis,
+      model: config.geminiModel,
+      groundedIn,
+    });
+  }
+
+  /**
+   * POST /api/admin/uploads/:recordId/review approves or rejects one upload.
+   *
+   * Approving writes `Status` = Approved and `Days` (1–30) to the row, which is exactly what
+   * grantUploadRewards turns into a Pro trial on the member's next request, and optionally copies
+   * the file into the chosen library table (`ISO` or `AATCC`) with the AI's method name and scope.
+   * Rejecting stores the reason in `Review note`. A row already marked `Rewarded` is never paid
+   * twice.
+   */
+  async function reviewUpload(request, recordId) {
+    await requireAdmin(request);
+    if (!/^rec[A-Za-z0-9]{14}$/.test(String(recordId || ''))) {
+      throw new HttpError(400, 'bad_request', 'A valid upload record id is required.');
+    }
+
+    const payload = await jsonBody(request);
+    const decision = String(payload?.decision || '').trim().toLowerCase();
+    if (decision !== 'approve' && decision !== 'reject') {
+      throw new HttpError(400, 'invalid_decision', 'Send decision "approve" or "reject".');
+    }
+
+    const record = await airtableRecord({
+      config,
+      table: config.uploadsTable,
+      recordId,
+      fetchImpl,
+      throttle: createThrottle(),
+    });
+    const fields = record?.fields || {};
+    const currentStatus = firstString(fields, [UPLOAD_FIELDS.status]);
+
+    const methodName = String(
+      payload?.methodName ?? firstString(fields, [UPLOAD_FIELDS.methodName]),
+    )
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 150);
+    const scope = String(payload?.scope ?? firstString(fields, [UPLOAD_FIELDS.scope]))
+      .trim()
+      .slice(0, 2000);
+    const standard = String(payload?.standard ?? firstString(fields, [UPLOAD_FIELDS.standard]))
+      .trim()
+      .slice(0, 40);
+    const note = String(payload?.note || '').trim().slice(0, 1000);
+
+    if (decision === 'reject') {
+      await airtableWrite({
+        config,
+        table: config.uploadsTable,
+        recordId,
+        fields: {
+          [UPLOAD_FIELDS.status]: 'Rejected',
+          [UPLOAD_FIELDS.reviewNote]: note || 'Rejected by an administrator.',
+          [UPLOAD_FIELDS.methodName]: methodName,
+          [UPLOAD_FIELDS.scope]: scope,
+          [UPLOAD_FIELDS.standard]: standard,
+        },
+        fetchImpl,
+        throttle: createThrottle(),
+      });
+      return jsonResponse(200, { ok: true, status: 'Rejected', days: 0, publishedIn: '' });
+    }
+
+    const days = Math.floor(Number(payload?.days));
+    if (!Number.isFinite(days) || days < UPLOAD_TRIAL_MIN_DAYS || days > UPLOAD_TRIAL_MAX_DAYS) {
+      throw new HttpError(
+        400,
+        'invalid_days',
+        `Days must be a whole number between ${UPLOAD_TRIAL_MIN_DAYS} and ${UPLOAD_TRIAL_MAX_DAYS}.`,
+      );
+    }
+    if (currentStatus === 'Rewarded') {
+      throw new HttpError(
+        409,
+        'already_rewarded',
+        'This upload has already added its Pro days. Nothing was changed.',
+      );
+    }
+
+    const publish = payload?.publish !== false;
+    const table = String(payload?.table || '').trim();
+    if (publish && !config.methodsTables.includes(table)) {
+      throw new HttpError(
+        400,
+        'invalid_table',
+        `Choose one of the library tables: ${config.methodsTables.join(', ')}.`,
+      );
+    }
+    if (publish && !methodName) {
+      throw new HttpError(
+        400,
+        'missing_method_name',
+        'Analyse the file or type the method name before adding it to the library.',
+      );
+    }
+
+    // Copy the submitted file and details into the library before the row is marked approved, so
+    // an approval never leaves a method row without its document.
+    // If the same upload is approved twice we reuse the existing library row instead of creating
+    // a duplicate, making publishing safe to retry.
+    let publishedIn = '';
+    if (publish) {
+      const title = firstString(fields, [UPLOAD_FIELDS.title]);
+      // Look for an existing library row with the same method name and submitted title.
+      const existing = await airtableList({
+        config,
+        table,
+        filterByFormula: `AND({Method}=${JSON.stringify(methodName)}, '{Method Name}'=${JSON.stringify(title)})`,
+        maxRecords: 1,
+        fetchImpl,
+        throttle: createThrottle(),
+      });
+      if (existing && existing.length > 0) {
+        // Reuse the existing row – it already has its file attached.
+        const existingRecord = existing[0];
+        publishedIn = `${table}/${existingRecord.id}`;
+      } else {
+        const created = await airtableWrite({
+          config,
+          table,
+          fields: {
+            Method: methodName,
+            'Method Name': title || methodName,
+            Scope: scope,
+          },
+          fetchImpl,
+          throttle: createThrottle(),
+        });
+        const methodRecordId = String(created?.id || '');
+        if (!methodRecordId) {
+          throw new HttpError(502, 'publish_failed', 'The method row was not created. Try again.');
+        }
+        if (attachment) {
+          const upstream = await fetchImpl(attachment.url);
+          if (!upstream.ok) {
+            throw new HttpError(
+              502,
+              'publish_failed',
+              `The method row ${methodRecordId} was created but its file could not be read (HTTP ${upstream.status}). Attach the file in Airtable.`,
+            );
+          }
+          const bytes = new Uint8Array(await upstream.arrayBuffer());
+          const uploaded = await fetchImpl(
+            `${config.uploadContentApi}/${config.baseId}/${methodRecordId}/` +
+              `${encodeURIComponent('File')}/uploadAttachment`,
+            {
+              method: 'POST',
+              headers: {
+                Authorization: `Bearer ${config.airtableToken}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                contentType: attachment.type || 'application/pdf',
+                file: base64FromBytes(bytes),
+                filename: attachment.filename || 'method.pdf',
+              }),
+            },
+          );
+          if (!uploaded.ok) {
+            throw new HttpError(
+              502,
+              'publish_failed',
+              `The method row ${methodRecordId} was created but its file was not attached (HTTP ${uploaded.status}). Attach it in Airtable.`,
+            );
+          }
+        }
+        publishedIn = `${table}/${methodRecordId}`;
+      }
+    }
+
+    const approvalFields = {
+      [UPLOAD_FIELDS.status]: 'Approved',
+      [UPLOAD_FIELDS.days]: days,
+      [UPLOAD_FIELDS.methodName]: methodName,
+      [UPLOAD_FIELDS.scope]: scope,
+      [UPLOAD_FIELDS.standard]: standard,
+      [UPLOAD_FIELDS.publishedIn]: publishedIn,
+    };
+    // A note typed in the console is kept; an empty one never clears what Airtable already says.
+    if (note) approvalFields[UPLOAD_FIELDS.reviewNote] = note;
+
+    await airtableWrite({
+      config,
+      table: config.uploadsTable,
+      recordId,
+      fields: approvalFields,
+      fetchImpl,
+      throttle: createThrottle(),
+    });
+
+    // Turn the approval into the Pro days right away; grantUploadRewards is idempotent, so the
+    // member's next request can never pay the same row twice.
+    try {
+      await grantUploadRewards(firstString(fields, [UPLOAD_FIELDS.email]));
+    } catch {
+      // The row is Approved and Days is set, so the next member request still pays it out.
+    }
+
+    return jsonResponse(200, {
+      ok: true,
+      status: 'Approved',
+      days,
+      publishedIn,
+      table: publishedIn ? table : '',
+    });
+  }
+
   async function adminRegisterTokenForMember(request, recordId) {
     await requireAdmin(request);
     if (!recordId || !/^rec[A-Za-z0-9]{14}$/.test(recordId)) {
@@ -2833,6 +3301,26 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
         throw new HttpError(405, 'method_not_allowed', 'Use GET for status or POST to send.');
       }
       return adminNotify(request);
+    }
+
+    // Review method uploads inside the app: list them, read one with Gemini, then approve or reject.
+    if (url.pathname === '/api/admin/uploads') {
+      if (method !== 'GET' && method !== 'HEAD') {
+        throw new HttpError(405, 'method_not_allowed', 'Only GET and HEAD are supported.');
+      }
+      return adminUploads(request);
+    }
+
+    const adminUploadAnalyse = /^\/api\/admin\/uploads\/([^/]+)\/analyse$/.exec(url.pathname);
+    if (adminUploadAnalyse) {
+      if (method !== 'POST') throw new HttpError(405, 'method_not_allowed', 'Use POST to analyse.');
+      return analyseUpload(request, adminUploadAnalyse[1]);
+    }
+
+    const adminUploadReview = /^\/api\/admin\/uploads\/([^/]+)\/review$/.exec(url.pathname);
+    if (adminUploadReview) {
+      if (method !== 'POST') throw new HttpError(405, 'method_not_allowed', 'Use POST to review.');
+      return reviewUpload(request, adminUploadReview[1]);
     }
 
     if (url.pathname === '/api/methods') {

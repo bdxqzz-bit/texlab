@@ -264,6 +264,79 @@ data class MemberMessage(
     val dateLabel: String get() = createdAt.take(10)
 }
 
+/**
+ * One method or document a member submitted for review, as the admin console lists it. The AI
+ * columns ([methodName], [scope], [standard]) are filled by the console's "Analyse with AI"
+ * action and stored on the Airtable row.
+ */
+data class MethodUpload(
+    val id: String,
+    val title: String,
+    val email: String,
+    val name: String,
+    val status: String,
+    val submittedAt: String = "",
+    val days: Int = 0,
+    val fileName: String = "",
+    val contentType: String = "",
+    val size: Long = 0,
+    val methodName: String = "",
+    val scope: String = "",
+    val standard: String = "",
+    /** `<table>/<recordId>` once the upload was copied into the method library. */
+    val publishedIn: String = "",
+    val reviewNote: String = "",
+) {
+    val displayName: String get() = name.takeIf { it.isNotBlank() } ?: email.substringBefore('@')
+    val statusLabel: String get() = status.trim().ifBlank { "Pending" }
+    val pending: Boolean
+        get() = statusLabel.equals("Pending", true) || statusLabel.equals("Upload failed", true)
+    val rewarded: Boolean get() = statusLabel.equals("Rewarded", true)
+    val rejected: Boolean get() = statusLabel.equals("Rejected", true)
+    /** What the console shows as the method's heading: the AI name, else the submitted title. */
+    val headline: String
+        get() = methodName.takeIf { it.isNotBlank() }
+            ?: title.takeIf { it.isNotBlank() }
+            ?: fileName.ifBlank { "Untitled upload" }
+    val dateLabel: String get() = submittedAt.take(10)
+    val publishedLabel: String get() = publishedIn.substringBefore('/').trim()
+    val fileLabel: String
+        get() = listOf(contentType.substringAfterLast('/').uppercase().ifBlank { "FILE" }, sizeLabel)
+            .filter { it.isNotBlank() }
+            .joinToString(" \u00b7 ")
+    val sizeLabel: String
+        get() = when {
+            size <= 0 -> ""
+            size < 1024 -> "$size B"
+            size < 1024 * 1024 -> "${size / 1024} KB"
+            else -> String.format(Locale.getDefault(), "%.1f MB", size / (1024.0 * 1024.0))
+        }
+}
+
+/** The upload list plus what the console needs to offer an AI review and a library table. */
+data class AdminUploads(
+    val uploads: List<MethodUpload> = emptyList(),
+    val assistant: Boolean = false,
+    val tables: List<String> = emptyList(),
+)
+
+/** What the AI read out of one submitted document. */
+data class UploadAnalysis(
+    val methodName: String,
+    val scope: String,
+    val standard: String = "",
+    val groundedIn: String = "",
+)
+
+/** What the proxy reports after an approval or rejection. */
+data class UploadReviewResult(
+    val status: String,
+    val days: Int = 0,
+    val publishedIn: String = "",
+) {
+    val publishedLabel: String get() = publishedIn.substringBefore('/').trim()
+}
+
 /** Who an admin notification goes to. */
 enum class AdminTarget(val label: String) {
     SELECTED("Selected"),

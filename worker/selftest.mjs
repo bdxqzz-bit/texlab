@@ -120,6 +120,8 @@ let uploadedAttachment = null;
 const writes = [];
 /** Every generateContent call the Worker made, so the prompt can be asserted on. */
 const geminiCalls = [];
+/** Method rows the admin console published from an approved upload: id -> { table, record }. */
+const createdMethods = new Map();
 let nextRecord = 1;
 
 function seedMember(email, fields) {
@@ -174,13 +176,35 @@ const stub = http.createServer((req, res) => {
     return res.end(AATCC_PDF_BYTES);
   }
 
+  // The file the stub attached to an upload, served back so the Worker can read it.
+  if (url.pathname === '/uploaded-file') {
+    res.writeHead(200, { 'Content-Type': 'application/pdf' });
+    return res.end(PDF_BYTES);
+  }
+
   // Airtable's content API: the file itself arrives as base64 for one attachment field.
   if (url.pathname.startsWith('/content/')) {
     let raw = '';
     req.on('data', (chunk) => (raw += chunk));
     return req.on('end', () => {
-      uploadedAttachment = JSON.parse(raw || '{}');
-      return send(200, { id: 'attUPLOAD00000001', url: 'https://example.invalid/upload' });
+      const body = JSON.parse(raw || '{}');
+      uploadedAttachment = body;
+      const target = parts[2];
+      const field = decodeURIComponent(parts[3] || '');
+      const attachment = {
+        id: 'attUPLOAD00000001',
+        url: `${origin}/uploaded-file`,
+        filename: body.filename || 'method.pdf',
+        size: body.file ? Buffer.from(body.file, 'base64').length : 0,
+        type: body.contentType || 'application/pdf',
+      };
+      if (field === 'File') {
+        if (uploads.has(target)) uploads.get(target).fields[field] = [attachment];
+        else if (createdMethods.has(target)) {
+          createdMethods.get(target).record.fields[field] = [attachment];
+        }
+      }
+      return send(200, { id: attachment.id, url: attachment.url });
     });
   }
 
@@ -196,6 +220,27 @@ const stub = http.createServer((req, res) => {
       });
       if (JSON.stringify(parsed).includes('FAILME')) {
         return send(500, { error: { message: 'upstream exploded' } });
+      }
+      // The admin console's AI review asks for a JSON answer; the question assistant gets prose.
+      if (JSON.stringify(parsed).includes('methodName')) {
+        return send(200, {
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    text: JSON.stringify({
+                      methodName: 'ISO 105-C06',
+                      scope:
+                        'Determines the colour fastness of textiles to domestic and commercial laundering.',
+                      standard: 'ISO',
+                    }),
+                  },
+                ],
+              },
+            },
+          ],
+        });
       }
       return send(200, {
         candidates: [
@@ -235,6 +280,10 @@ const stub = http.createServer((req, res) => {
   }
 
   if (table === 'Method uploads') {
+    if (req.method === 'GET' && recordId) {
+      const record = uploads.get(recordId);
+      return record ? send(200, record) : send(404, { error: { type: 'NOT_FOUND' } });
+    }
     if (req.method === 'POST') {
       let raw = '';
       req.on('data', (chunk) => (raw += chunk));
@@ -309,8 +358,22 @@ const stub = http.createServer((req, res) => {
     return send(200, { records: [members.get(email)] });
   }
 
+  // A method the admin console published from an approved upload.
+  if ((table === 'ISO' || table === 'AATCC') && req.method === 'POST') {
+    let raw = '';
+    req.on('data', (chunk) => (raw += chunk));
+    return req.on('end', () => {
+      const fields = JSON.parse(raw || '{}').fields || {};
+      const id = `recNEW${String(createdMethods.size + 1).padStart(11, '0')}`;
+      const record = { id, fields };
+      createdMethods.set(id, { table, record });
+      writes.push({ method: 'POST', table, recordId: id, fields });
+      return send(200, record);
+    });
+  }
+
   if (recordId) {
-    const method = METHODS_BY_ID.get(recordId);
+    const method = METHODS_BY_ID.get(recordId) || createdMethods.get(recordId)?.record;
     return method ? send(200, method) : send(404, { error: { type: 'NOT_FOUND' } });
   }
   if (table === 'ISO') return send(200, { records: [ISO_RECORD] });
@@ -1643,6 +1706,161 @@ await check('an upload approved by an admin adds 1–30 days of Pro, once', asyn
   const again = await call('/api/me', { token: uploaderToken });
   const againDays = (Date.parse(again.body.proUntil) - Date.now()) / (24 * 60 * 60 * 1000);
   assert.ok(againDays > 8.9 && againDays < 9.1, `the same row must not pay twice: ${againDays}`);
+});
+
+// ---------------------------------------------------------------------------
+// Admin console: review uploads, read them with Gemini, publish into the library
+// ---------------------------------------------------------------------------
+
+const pendingUpload = await call('/api/method-uploads', {
+  token: uploaderToken,
+  method: 'POST',
+  body: {
+    title: 'Colour fastness to washing',
+    filename: 'washing.pdf',
+    contentType: 'application/pdf',
+    file: SMALL_PDF,
+  },
+});
+const pendingId = pendingUpload.body.id;
+
+await check('a member cannot list or review method uploads', async () => {
+  const token = mintToken(googleClaims('pro@example.com', 'Pro', 'Member', ''));
+  const list = await call('/api/admin/uploads', { token });
+  assert.equal(list.status, 403);
+  assert.equal(list.body.error, 'not_an_admin');
+  const review = await call(`/api/admin/uploads/${pendingId}/review`, {
+    token,
+    method: 'POST',
+    body: { decision: 'approve', days: 5, table: 'ISO' },
+  });
+  assert.equal(review.status, 403);
+});
+
+await check('the admin console lists pending uploads with their member and file', async () => {
+  const { status, body } = await call('/api/admin/uploads', { token: adminToken });
+  assert.equal(status, 200, JSON.stringify(body));
+  const row = body.uploads.find((entry) => entry.id === pendingId);
+  assert.ok(row, 'the pending upload must be listed');
+  assert.equal(row.status, 'Pending');
+  assert.equal(row.email, 'uploader@example.com');
+  assert.equal(row.fileName, 'washing.pdf');
+  assert.equal(row.contentType, 'application/pdf');
+  assert.equal(row.methodName, '');
+  assert.deepEqual(body.tables, ['ISO', 'AATCC']);
+  assert.equal(body.assistant, true);
+});
+
+await check('the AI review writes the method name, scope and standard onto the row', async () => {
+  const before = geminiCalls.length;
+  const { status, body } = await call(`/api/admin/uploads/${pendingId}/analyse`, {
+    token: adminToken,
+    method: 'POST',
+    body: {},
+  });
+  assert.equal(status, 200, JSON.stringify(body));
+  assert.equal(body.methodName, 'ISO 105-C06');
+  assert.ok(body.scope.startsWith('Determines the colour fastness'), body.scope);
+  assert.equal(body.standard, 'ISO');
+  assert.equal(body.groundedIn, 'file');
+  assert.equal(geminiCalls.length, before + 1, 'one Gemini call per analysis');
+  const row = uploads.get(pendingId).fields;
+  assert.equal(row['Method name'], 'ISO 105-C06');
+  assert.ok(row.Scope);
+  assert.equal(row.Standard, 'ISO');
+});
+
+await check('an approval publishes the method and pays its Pro days once', async () => {
+  inviteKv.store.delete('uploads:checked:uploader@example.com');
+  const before = createdMethods.size;
+  const { status, body } = await call(`/api/admin/uploads/${pendingId}/review`, {
+    token: adminToken,
+    method: 'POST',
+    body: { decision: 'approve', days: 12, table: 'ISO', note: 'Good method.' },
+  });
+  assert.equal(status, 200, JSON.stringify(body));
+  assert.equal(body.status, 'Approved');
+  assert.equal(body.days, 12);
+  assert.ok(body.publishedIn.startsWith('ISO/'), body.publishedIn);
+  assert.equal(createdMethods.size, before + 1, 'one method row is created');
+
+  const published = [...createdMethods.values()].at(-1);
+  assert.equal(published.table, 'ISO');
+  assert.equal(published.record.fields.Method, 'ISO 105-C06');
+  assert.equal(published.record.fields['Method Name'], 'Colour fastness to washing');
+  assert.ok(published.record.fields.Scope);
+  assert.equal(uploadedAttachment.filename, 'washing.pdf', 'the file follows the method row');
+
+  const row = uploads.get(pendingId).fields;
+  assert.equal(row['Published in'], body.publishedIn);
+  assert.equal(row['Review note'], 'Good method.');
+
+  const me = await call('/api/me', { token: uploaderToken });
+  assert.equal(me.body.level, 'pro');
+  assert.equal(uploads.get(pendingId).fields.Status, 'Rewarded', 'the approval is paid out once');
+});
+
+await check('an upload that was already rewarded cannot be approved again', async () => {
+  const { status, body } = await call(`/api/admin/uploads/${pendingId}/review`, {
+    token: adminToken,
+    method: 'POST',
+    body: { decision: 'approve', days: 3, table: 'ISO' },
+  });
+  assert.equal(status, 409);
+  assert.equal(body.error, 'already_rewarded');
+});
+
+await check('an approval needs valid days and a configured library table', async () => {
+  const second = await call('/api/method-uploads', {
+    token: uploaderToken,
+    method: 'POST',
+    body: {
+      title: 'Tear strength of woven fabrics',
+      filename: 'tear.pdf',
+      contentType: 'application/pdf',
+      file: SMALL_PDF,
+    },
+  });
+  const id = second.body.id;
+
+  const noDays = await call(`/api/admin/uploads/${id}/review`, {
+    token: adminToken,
+    method: 'POST',
+    body: { decision: 'approve', table: 'ISO' },
+  });
+  assert.equal(noDays.status, 400);
+  assert.equal(noDays.body.error, 'invalid_days');
+
+  const badTable = await call(`/api/admin/uploads/${id}/review`, {
+    token: adminToken,
+    method: 'POST',
+    body: { decision: 'approve', days: 5, table: 'ASTM' },
+  });
+  assert.equal(badTable.status, 400);
+  assert.equal(badTable.body.error, 'invalid_table');
+
+  const rejected = await call(`/api/admin/uploads/${id}/review`, {
+    token: adminToken,
+    method: 'POST',
+    body: { decision: 'reject', note: 'Not a test method.' },
+  });
+  assert.equal(rejected.status, 200, JSON.stringify(rejected.body));
+  assert.equal(uploads.get(id).fields.Status, 'Rejected');
+  assert.equal(uploads.get(id).fields['Review note'], 'Not a test method.');
+});
+
+await check('AI review reports a missing Gemini key instead of failing silently', async () => {
+  const withoutGemini = createProxy({ env: { ...env, GEMINI_API_KEY: '' } });
+  const response = await withoutGemini(
+    new Request(`${base}/api/admin/uploads/${pendingId}/analyse`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+      body: '{}',
+    }),
+  );
+  const body = await response.json();
+  assert.equal(response.status, 503, JSON.stringify(body));
+  assert.equal(body.error, 'gemini_not_configured');
 });
 
 stub.close();

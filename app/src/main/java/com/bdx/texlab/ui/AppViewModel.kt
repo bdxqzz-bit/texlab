@@ -17,6 +17,7 @@ import com.bdx.texlab.data.AdminTarget
 import com.bdx.texlab.data.AppConfig
 import com.bdx.texlab.data.InviteInfo
 import com.bdx.texlab.data.MemberMessage
+import com.bdx.texlab.data.MethodUpload
 import com.bdx.texlab.data.MembershipLevel
 import com.bdx.texlab.data.MemberStatus
 import com.bdx.texlab.data.MembershipResult
@@ -78,6 +79,27 @@ data class AdminUiState(
     val messages: List<MemberMessage> = emptyList(),
     val messagesLoading: Boolean = false,
     val messagesError: String? = null,
+    /** Methods members submitted for review, newest first. */
+    val uploads: List<MethodUpload> = emptyList(),
+    val uploadsLoading: Boolean = false,
+    val uploadsError: String? = null,
+    /** False when the Worker has no Gemini key: the console then offers review without AI. */
+    val uploadsAssistant: Boolean = false,
+    /** Library tables an approval may publish into (`ISO`, `AATCC`). */
+    val uploadTables: List<String> = emptyList(),
+    /** The upload whose review sheet is open, and the values being edited in it. */
+    val openUpload: MethodUpload? = null,
+    val draftUploadMethodName: String = "",
+    val draftUploadScope: String = "",
+    val draftUploadStandard: String = "",
+    val draftUploadTable: String = "",
+    val draftUploadDays: Int = 7,
+    val draftUploadPublish: Boolean = true,
+    val analysingUpload: Boolean = false,
+    val reviewingUpload: Boolean = false,
+    val uploadError: String? = null,
+    /** One line about the last approval or rejection, shown in the console. */
+    val uploadNotice: String? = null,
 ) {
     /** What the detail sheet shows: the draft while editing, otherwise the saved row. */
     val editRole: AdminRole get() = draftRole ?: openMember?.adminRole ?: AdminRole.MEMBER
@@ -930,6 +952,294 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                             admin = state.admin.copy(
                                 messagesLoading = false,
                                 messagesError = error.message ?: "Could not load member messages.",
+                            ),
+                        )
+                    }
+                }
+        }
+    }
+
+    /** Loads the method uploads awaiting review; a member role never gets this far. */
+    fun loadAdminUploads() {
+        val current = _state.value
+        if (!current.isAdmin || current.admin.uploadsLoading) return
+        _state.update { it.copy(admin = it.admin.copy(uploadsLoading = true, uploadsError = null)) }
+        viewModelScope.launch {
+            runCatching { proxyClient.adminUploads() }
+                .onSuccess { result ->
+                    _state.update { state ->
+                        val tables = result.tables.ifEmpty { listOf("ISO", "AATCC") }
+                        state.copy(
+                            admin = state.admin.copy(
+                                uploads = result.uploads,
+                                uploadsAssistant = result.assistant,
+                                uploadTables = tables,
+                                uploadsLoading = false,
+                                uploadsError = null,
+                                // Keep an open review sheet pointed at the refreshed row.
+                                openUpload = state.admin.openUpload?.let { open ->
+                                    result.uploads.firstOrNull { it.id == open.id } ?: open
+                                },
+                            ),
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    _state.update { state ->
+                        state.copy(
+                            admin = state.admin.copy(
+                                uploadsLoading = false,
+                                uploadsError = error.message ?: "Could not load method uploads.",
+                            ),
+                        )
+                    }
+                }
+        }
+    }
+
+    /** Opens one upload's review sheet, seeded with whatever the AI review already stored. */
+    fun openAdminUpload(uploadId: String) {
+        _state.update { state ->
+            val upload = state.admin.uploads.firstOrNull { it.id == uploadId } ?: return@update state
+            val tables = state.admin.uploadTables.ifEmpty { listOf("ISO", "AATCC") }
+            val detected = upload.standard.takeIf { value ->
+                tables.any { it.equals(value, ignoreCase = true) }
+            }
+            state.copy(
+                admin = state.admin.copy(
+                    openUpload = upload,
+                    draftUploadMethodName = upload.methodName,
+                    draftUploadScope = upload.scope,
+                    draftUploadStandard = upload.standard,
+                    draftUploadTable = detected ?: tables.first(),
+                    draftUploadDays = upload.days.takeIf { it in 1..30 } ?: 7,
+                    draftUploadPublish = true,
+                    analysingUpload = false,
+                    reviewingUpload = false,
+                    uploadError = null,
+                ),
+            )
+        }
+    }
+
+    fun closeAdminUpload() {
+        _state.update { state ->
+            state.copy(
+                admin = state.admin.copy(
+                    openUpload = null,
+                    analysingUpload = false,
+                    reviewingUpload = false,
+                    uploadError = null,
+                ),
+            )
+        }
+    }
+
+    fun setAdminUploadMethodName(value: String) {
+        _state.update {
+            it.copy(admin = it.admin.copy(draftUploadMethodName = value.take(150), uploadError = null))
+        }
+    }
+
+    fun setAdminUploadScope(value: String) {
+        _state.update {
+            it.copy(admin = it.admin.copy(draftUploadScope = value.take(2000), uploadError = null))
+        }
+    }
+
+    fun setAdminUploadTable(table: String) {
+        _state.update { it.copy(admin = it.admin.copy(draftUploadTable = table, uploadError = null)) }
+    }
+
+    fun setAdminUploadDays(days: Int) {
+        _state.update {
+            it.copy(admin = it.admin.copy(draftUploadDays = days.coerceIn(1, 30), uploadError = null))
+        }
+    }
+
+    fun setAdminUploadPublish(publish: Boolean) {
+        _state.update { it.copy(admin = it.admin.copy(draftUploadPublish = publish, uploadError = null)) }
+    }
+
+    /**
+     * Reads the open upload with Gemini and fills the review fields. The same values are written to
+     * the Airtable row by the Worker, so the console and the table stay in step.
+     */
+    fun analyseAdminUpload() {
+        val current = _state.value
+        val admin = current.admin
+        val upload = admin.openUpload ?: return
+        if (!current.isAdmin || admin.analysingUpload) return
+
+        _state.update { it.copy(admin = it.admin.copy(analysingUpload = true, uploadError = null)) }
+        viewModelScope.launch {
+            runCatching { proxyClient.adminAnalyseUpload(upload.id) }
+                .onSuccess { analysis ->
+                    _state.update { state ->
+                        val tables = state.admin.uploadTables
+                        val detected = analysis.standard.takeIf { value ->
+                            tables.any { it.equals(value, ignoreCase = true) }
+                        }
+                        state.copy(
+                            admin = state.admin.copy(
+                                analysingUpload = false,
+                                draftUploadMethodName = analysis.methodName,
+                                draftUploadScope = analysis.scope,
+                                draftUploadStandard = analysis.standard,
+                                draftUploadTable = detected ?: state.admin.draftUploadTable,
+                                uploads = state.admin.uploads.map { row ->
+                                    if (row.id != upload.id) {
+                                        row
+                                    } else {
+                                        row.copy(
+                                            methodName = analysis.methodName,
+                                            scope = analysis.scope,
+                                            standard = analysis.standard,
+                                        )
+                                    }
+                                },
+                                openUpload = state.admin.openUpload?.copy(
+                                    methodName = analysis.methodName,
+                                    scope = analysis.scope,
+                                    standard = analysis.standard,
+                                ),
+                                uploadError = null,
+                            ),
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    _state.update { state ->
+                        state.copy(
+                            admin = state.admin.copy(
+                                analysingUpload = false,
+                                uploadError = error.message ?: "The file could not be analysed.",
+                            ),
+                        )
+                    }
+                }
+        }
+    }
+
+    /** Approves the open upload: adds its Pro days and, when asked, the method to the library. */
+    fun approveAdminUpload() {
+        val current = _state.value
+        val admin = current.admin
+        val upload = admin.openUpload ?: return
+        if (!current.isAdmin || admin.reviewingUpload) return
+        if (admin.draftUploadPublish && admin.draftUploadMethodName.isBlank()) {
+            _state.update {
+                it.copy(
+                    admin = it.admin.copy(
+                        uploadError = "Analyse the file or type the method name before adding it to the library.",
+                    ),
+                )
+            }
+            return
+        }
+
+        _state.update { it.copy(admin = it.admin.copy(reviewingUpload = true, uploadError = null)) }
+        viewModelScope.launch {
+            runCatching {
+                proxyClient.adminReviewUpload(
+                    recordId = upload.id,
+                    approve = true,
+                    days = admin.draftUploadDays.coerceIn(1, 30),
+                    methodName = admin.draftUploadMethodName.trim(),
+                    scope = admin.draftUploadScope.trim(),
+                    standard = admin.draftUploadStandard.trim(),
+                    table = admin.draftUploadTable,
+                    publishToLibrary = admin.draftUploadPublish,
+                )
+            }
+                .onSuccess { result ->
+                    _state.update { state ->
+                        state.copy(
+                            admin = state.admin.copy(
+                                uploads = state.admin.uploads.map { row ->
+                                    if (row.id != upload.id) {
+                                        row
+                                    } else {
+                                        row.copy(
+                                            status = result.status,
+                                            days = result.days,
+                                            publishedIn = result.publishedIn,
+                                            methodName = state.admin.draftUploadMethodName,
+                                            scope = state.admin.draftUploadScope,
+                                            standard = state.admin.draftUploadStandard,
+                                        )
+                                    }
+                                },
+                                openUpload = null,
+                                reviewingUpload = false,
+                                uploadError = null,
+                                uploadNotice = buildString {
+                                    append("Approved: ${result.days} days of Pro added")
+                                    if (result.publishedLabel.isNotBlank()) {
+                                        append(" \u00b7 added to ${result.publishedLabel}")
+                                    }
+                                    append(".")
+                                },
+                            ),
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    _state.update { state ->
+                        state.copy(
+                            admin = state.admin.copy(
+                                reviewingUpload = false,
+                                uploadError = error.message ?: "The upload could not be approved.",
+                            ),
+                        )
+                    }
+                }
+        }
+    }
+
+    /** Rejects the open upload with [note]; the member keeps their plan and the note stays on the row. */
+    fun rejectAdminUpload(note: String = "") {
+        val current = _state.value
+        val admin = current.admin
+        val upload = admin.openUpload ?: return
+        if (!current.isAdmin || admin.reviewingUpload) return
+
+        _state.update { it.copy(admin = it.admin.copy(reviewingUpload = true, uploadError = null)) }
+        viewModelScope.launch {
+            runCatching {
+                proxyClient.adminReviewUpload(
+                    recordId = upload.id,
+                    approve = false,
+                    methodName = admin.draftUploadMethodName.trim(),
+                    scope = admin.draftUploadScope.trim(),
+                    standard = admin.draftUploadStandard.trim(),
+                    note = note.trim().takeIf { it.isNotBlank() } ?: "",
+                )
+            }
+                .onSuccess { result ->
+                    _state.update { state ->
+                        state.copy(
+                            admin = state.admin.copy(
+                                uploads = state.admin.uploads.map { row ->
+                                    if (row.id == upload.id) row.copy(status = result.status) else row
+                                },
+                                openUpload = null,
+                                reviewingUpload = false,
+                                uploadError = null,
+                                uploadNotice = when {
+                                    result.status == "Rejected" -> "Rejected."
+                                    else -> "Rejected: nothing was added to the member's plan."
+                                },
+                            ),
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    _state.update { state ->
+                        state.copy(
+                            admin = state.admin.copy(
+                                reviewingUpload = false,
+                                uploadError = error.message ?: "The upload could not be rejected.",
                             ),
                         )
                     }

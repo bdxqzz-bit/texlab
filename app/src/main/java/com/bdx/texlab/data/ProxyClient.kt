@@ -208,6 +208,59 @@ private data class AdminUsageDto(
 )
 
 @Serializable
+private data class AdminUploadsResponse(
+    val uploads: List<AdminUploadDto> = emptyList(),
+    val assistant: Boolean = false,
+    val tables: List<String> = emptyList(),
+)
+
+@Serializable
+private data class AdminUploadDto(
+    val id: String = "",
+    val title: String = "",
+    val email: String = "",
+    val name: String = "",
+    val status: String = "",
+    val submittedAt: String = "",
+    val days: Int = 0,
+    val fileName: String = "",
+    val contentType: String = "",
+    val size: Long = 0,
+    val methodName: String = "",
+    val scope: String = "",
+    val standard: String = "",
+    val publishedIn: String = "",
+    val reviewNote: String = "",
+)
+
+@Serializable
+private data class AdminUploadAnalysisResponse(
+    val methodName: String = "",
+    val scope: String = "",
+    val standard: String = "",
+    val groundedIn: String = "",
+)
+
+@Serializable
+private data class AdminUploadReviewBody(
+    val decision: String,
+    val days: Int = 0,
+    val methodName: String = "",
+    val scope: String = "",
+    val standard: String = "",
+    val table: String = "",
+    val publish: Boolean = true,
+    val note: String = "",
+)
+
+@Serializable
+private data class AdminUploadReviewResponse(
+    val status: String = "",
+    val days: Int = 0,
+    val publishedIn: String = "",
+)
+
+@Serializable
 private data class AdminNotifyBody(
     val title: String,
     val body: String,
@@ -477,6 +530,73 @@ class ProxyClient(
     }
 
     /**
+     * The method uploads waiting for review, newest first, plus the library tables an approval
+     * may publish into and whether AI review is configured on the server.
+     */
+    suspend fun adminUploads(): AdminUploads = withContext(Dispatchers.IO) {
+        http.newCall(request("/api/admin/uploads")).execute().use { response ->
+            val body = response.body?.string().orEmpty()
+            if (!response.isSuccessful) throw ProxyException(describe(response.code, body), response.code)
+            val dto = json.decodeFromString<AdminUploadsResponse>(body)
+            AdminUploads(
+                uploads = dto.uploads
+                    .filter { it.id.isNotBlank() }
+                    .map { it.toMethodUpload() },
+                assistant = dto.assistant,
+                tables = dto.tables,
+            )
+        }
+    }
+
+    /**
+     * Asks the proxy's Gemini review to read one submitted document and write its method name,
+     * scope and standard onto the upload row. The AI key stays on the Worker.
+     */
+    suspend fun adminAnalyseUpload(recordId: String): UploadAnalysis = withContext(Dispatchers.IO) {
+        val raw = post("/api/admin/uploads/${recordId.trim()}/analyse", "{}")
+        val dto = json.decodeFromString<AdminUploadAnalysisResponse>(raw)
+        UploadAnalysis(
+            methodName = dto.methodName,
+            scope = dto.scope,
+            standard = dto.standard,
+            groundedIn = dto.groundedIn,
+        )
+    }
+
+    /**
+     * Approves one upload with [days] of Pro (optionally publishing it into [table]) or rejects it
+     * with [note]. Approving pays the member's trial on the Worker, exactly once per row.
+     */
+    suspend fun adminReviewUpload(
+        recordId: String,
+        approve: Boolean,
+        days: Int = 0,
+        methodName: String = "",
+        scope: String = "",
+        standard: String = "",
+        table: String = "",
+        publishToLibrary: Boolean = true,
+        note: String = "",
+    ): UploadReviewResult = withContext(Dispatchers.IO) {
+        val payload = json.encodeToString(
+            AdminUploadReviewBody.serializer(),
+            AdminUploadReviewBody(
+                decision = if (approve) "approve" else "reject",
+                days = days,
+                methodName = methodName,
+                scope = scope,
+                standard = standard,
+                table = table,
+                publish = publishToLibrary,
+                note = note,
+            ),
+        )
+        val raw = post("/api/admin/uploads/${recordId.trim()}/review", payload)
+        val dto = json.decodeFromString<AdminUploadReviewResponse>(raw)
+        UploadReviewResult(status = dto.status, days = dto.days, publishedIn = dto.publishedIn)
+    }
+
+    /**
      * Asks the document assistant a question about one method. The Worker builds the document
      * text from the Airtable row and calls Gemini with its own key, so this app never holds an
      * AI credential; [history] is the visible conversation so far, oldest first, as
@@ -650,6 +770,24 @@ private fun UsageDto.toQuota(level: String?) = UsageQuota(
     downloadsUsed = downloadsUsed,
     asksLimit = asksLimit,
     asksUsed = asksUsed,
+)
+
+private fun AdminUploadDto.toMethodUpload() = MethodUpload(
+    id = id,
+    title = title,
+    email = email,
+    name = name,
+    status = status.ifBlank { "Pending" },
+    submittedAt = submittedAt,
+    days = days,
+    fileName = fileName,
+    contentType = contentType,
+    size = size,
+    methodName = methodName,
+    scope = scope,
+    standard = standard,
+    publishedIn = publishedIn,
+    reviewNote = reviewNote,
 )
 
 private fun MemberMessageDto.toMemberMessage() = MemberMessage(
