@@ -79,11 +79,16 @@ data class UsageQuota(
     val viewsUsed: Int,
     val downloadsLimit: Int,
     val downloadsUsed: Int,
+    /** Daily "Ask AI" questions, shown in the document assistant. */
+    val asksLimit: Int = 0,
+    val asksUsed: Int = 0,
 ) {
     val viewsLeft: Int get() = (viewsLimit - viewsUsed).coerceAtLeast(0)
     val downloadsLeft: Int get() = (downloadsLimit - downloadsUsed).coerceAtLeast(0)
+    val asksLeft: Int get() = (asksLimit - asksUsed).coerceAtLeast(0)
     val canView: Boolean get() = viewsLeft > 0
     val canDownload: Boolean get() = downloadsLeft > 0
+    val canAsk: Boolean get() = asksLeft > 0
 }
 
 /** Result of asking the proxy for the signed-in Google account's membership. */
@@ -96,11 +101,45 @@ sealed interface MembershipResult {
         val lastName: String = "",
         val photoUrl: String? = null,
         val quota: UsageQuota? = null,
+        /** ISO time the invite-earned Pro trial ends, when one is running. */
+        val proUntil: String? = null,
     ) : MembershipResult
 
     data object NotAMember : MembershipResult
     data class Failed(val message: String) : MembershipResult
 }
+
+/**
+ * The signed-in member's invitation code and the Pro trial it earns. The proxy creates the code on
+ * the first request and never changes it; [proUntil] is the end of a running trial, earned when
+ * this member redeemed someone else's code or someone redeemed theirs.
+ */
+data class InviteInfo(
+    val code: String = "",
+    val proUntil: String? = null,
+    val trialDays: Int = 7,
+    val invites: Int = 0,
+    val redeemed: Boolean = false,
+) {
+    /** "3 Dec 2026" for the day the trial ends, or null when no trial is running. */
+    val proUntilLabel: String?
+        get() = proUntil?.let { iso ->
+            runCatching { Instant.parse(iso) }.getOrNull()?.let { at ->
+                DateTimeFormatter.ofPattern("d MMM yyyy", Locale.getDefault())
+                    .withZone(ZoneId.systemDefault())
+                    .format(at)
+            }
+        }
+}
+
+/**
+ * What the proxy answered after a member submitted a method/document for review. Approval adds
+ * between 1 and 30 days of Pro; the reply is only the review status and the line to show.
+ */
+data class MethodUploadResult(
+    val status: String = "Pending",
+    val note: String = "",
+)
 
 /** Roles in the Members table that may use the admin console. Mirrors the Worker's ADMIN_ROLES. */
 private val ADMIN_ROLES = setOf("admin", "administrator", "owner", "manager")

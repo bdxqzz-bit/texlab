@@ -23,7 +23,9 @@ import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.WorkspacePremium
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Card
@@ -70,9 +72,12 @@ fun HomeScreen(
     onRefresh: () -> Unit,
     onTogglePush: (Boolean) -> Unit,
     onOpenAdmin: () -> Unit,
+    onOpenInvite: () -> Unit,
+    onOpenMembership: () -> Unit,
     onOpenContact: () -> Unit,
     onOpenAbout: () -> Unit,
     onOpenNotifications: () -> Unit,
+    onDismissInviteNotice: () -> Unit,
     unseenNotifications: Int,
     onSignOut: () -> Unit,
 ) {
@@ -112,16 +117,24 @@ fun HomeScreen(
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                             )
-                            Text(
-                                text = buildString {
-                                    append(state.level?.label ?: "Basic")
-                                    append(" member")
-                                    state.role
-                                        ?.takeIf { it.isNotBlank() && !it.equals("Member", true) }
-                                        ?.let { append(" · ").append(it) }
-                                },
-                                style = MaterialTheme.typography.labelSmall,
-                            )
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                // The membership badge: tap it for the plan and the upgrade paths.
+                                MembershipBadge(
+                                    level = state.level?.label ?: "Basic",
+                                    onClick = onOpenMembership,
+                                )
+                                state.role
+                                    ?.takeIf { it.isNotBlank() && !it.equals("Member", true) }
+                                    ?.let { role ->
+                                        Text(
+                                            text = "· $role",
+                                            style = MaterialTheme.typography.labelSmall,
+                                        )
+                                    }
+                            }
                         }
                     }
                 },
@@ -163,6 +176,16 @@ fun HomeScreen(
                                     },
                                 )
                             }
+                            DropdownMenuItem(
+                                text = { Text("Invite a colleague") },
+                                leadingIcon = {
+                                    Icon(Icons.Filled.PersonAdd, contentDescription = null)
+                                },
+                                onClick = {
+                                    menuExpanded = false
+                                    onOpenInvite()
+                                },
+                            )
                             DropdownMenuItem(
                                 text = { Text("Report or request") },
                                 leadingIcon = {
@@ -222,6 +245,25 @@ fun HomeScreen(
                 .padding(horizontal = 16.dp, vertical = 16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
+            // The result of redeeming a code typed at sign-up, shown once and dismissible.
+            state.invite.notice?.let { notice ->
+                Card(shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Text(
+                            text = notice,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                        androidx.compose.material3.TextButton(onClick = onDismissInviteNotice) {
+                            Text("Dismiss")
+                        }
+                    }
+                }
+            }
+
             if (state.loadingMethods) {
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
             }
@@ -256,6 +298,34 @@ fun HomeScreen(
                 text = "Signed in as ${state.userEmail ?: state.memberName ?: "member"}",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/** The level pill in the home header; tapping it opens the membership card. */
+@Composable
+private fun MembershipBadge(level: String, onClick: () -> Unit) {
+    Surface(
+        shape = RoundedCornerShape(50),
+        color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.18f),
+        contentColor = MaterialTheme.colorScheme.onPrimary,
+        modifier = Modifier.clickable(onClickLabel = "Membership and upgrade", onClick = onClick),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Icon(
+                imageVector = Icons.Filled.WorkspacePremium,
+                contentDescription = null,
+                modifier = Modifier.size(13.dp),
+            )
+            Text(
+                text = "$level member",
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.SemiBold,
             )
         }
     }

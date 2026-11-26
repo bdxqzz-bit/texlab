@@ -44,6 +44,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.bdx.texlab.data.UsageQuota
 import com.bdx.texlab.ui.DocumentChatMessage
 import com.bdx.texlab.ui.DocumentChatState
 
@@ -58,6 +59,7 @@ import com.bdx.texlab.ui.DocumentChatState
 fun DocumentChatDialog(
     methodTitle: String,
     chat: DocumentChatState,
+    quota: UsageQuota?,
     onDismiss: () -> Unit,
     onAsk: (String) -> Unit,
 ) {
@@ -112,6 +114,24 @@ fun DocumentChatDialog(
                             .padding(horizontal = 12.dp, vertical = 8.dp),
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
+                        // The day's Ask AI allowance, as the proxy counts it.
+                        quota?.takeIf { it.asksLimit > 0 }?.let { today ->
+                            Text(
+                                text = if (today.asksLeft > 0) {
+                                    "${today.asksLeft} of ${today.asksLimit} AI questions left today"
+                                } else {
+                                    "No AI questions left today · resets at 00:00 UTC"
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (today.asksLeft > 0) {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                } else {
+                                    MaterialTheme.colorScheme.error
+                                },
+                                textAlign = TextAlign.End,
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+                            )
+                        }
                         Row(
                             verticalAlignment = Alignment.Bottom,
                             horizontalArrangement = Arrangement.spacedBy(8.dp),

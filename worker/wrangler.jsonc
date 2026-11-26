@@ -4,6 +4,10 @@
   "main": "index.mjs",
   "compatibility_date": "2026-11-01",
   "observability": { "enabled": true },
+  // Invitation codes and the 7-day Pro trial they earn. Created with
+  //   npx wrangler kv namespace create INVITES
+  // Without this binding POST /api/invite answers 503 and the rest of the proxy is unaffected.
+  "kv_namespaces": [{ "binding": "INVITES", "id": "6c865eaf41aa4f3b9aa07508c7d024be" }],
   // Non-secret configuration. AIRTABLE_TOKEN is a secret, never a var:
   //   npx wrangler secret put AIRTABLE_TOKEN
   "vars": {
@@ -11,6 +15,10 @@
     "AIRTABLE_METHODS_TABLE": "ISO,AATCC",
     "AIRTABLE_MEMBERS_TABLE": "Members",
     "MESSAGES_TABLE": "Messages",
+    // Method/document uploads a member submits to earn 1–30 days of Pro. The table needs these
+    // columns: Title, Email, Name, File (attachment), File name, Content type, Size, Status,
+    // Submitted at, Days (number), Pro until (text), Review note (optional).
+    "AIRTABLE_UPLOADS_TABLE": "Method uploads",
     // "Ask AI" on a method's detail screen: answers are grounded in the method's attached PDF.
     // The key is a secret, never a var:
     //   npx wrangler secret put GEMINI_API_KEY
@@ -21,10 +29,12 @@
     // In-app updates: what GET /api/app/latest tells installed apps. Publish a new build, then
     // raise APP_VERSION_CODE and set APP_APK_URL to the signed APK's public https URL. Raise
     // APP_MIN_SUPPORTED to the new versionCode to force older installs to update.
-    "APP_VERSION_CODE": "8",
-    "APP_VERSION_NAME": "1.16",
+    "APP_VERSION_CODE": "9",
+    "APP_VERSION_NAME": "1.17",
     "APP_MIN_SUPPORTED": "1",
-    "APP_APK_URL": "https://github.com/bdxqzz-bit/texlab/releases/download/v1.16/app-release.apk",
-    "APP_RELEASE_NOTES": "New launcher icon: a woven cloth swatch under a magnifier, with a molecule and a thread spool. The admin console records who is active without making anyone wait for it."
+    "APP_APK_URL": "https://github.com/bdxqzz-bit/texlab/releases/download/v1.17/app-release.apk",
+    "APP_RELEASE_NOTES": "Your plan now sits in the home header: tap the badge for today's allowance, then upgrade by uploading a textile testing lab method to earn 1 to 30 days of Pro. Invite a colleague from the same screen and you both get 7 days.",
+    // Days of Pro both sides get when an invitation code is redeemed (default 7).
+    "INVITE_TRIAL_DAYS": "7"
   }
 }

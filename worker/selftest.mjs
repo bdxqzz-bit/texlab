@@ -113,6 +113,10 @@ const members = new Map();
 /** Messages table: record id -> { id, fields, createdTime }. */
 const messages = new Map();
 let nextMessage = 1;
+/** Method uploads table: record id -> { id, fields }, plus the last attachment body sent. */
+const uploads = new Map();
+let nextUpload = 1;
+let uploadedAttachment = null;
 const writes = [];
 /** Every generateContent call the Worker made, so the prompt can be asserted on. */
 const geminiCalls = [];
@@ -170,6 +174,16 @@ const stub = http.createServer((req, res) => {
     return res.end(AATCC_PDF_BYTES);
   }
 
+  // Airtable's content API: the file itself arrives as base64 for one attachment field.
+  if (url.pathname.startsWith('/content/')) {
+    let raw = '';
+    req.on('data', (chunk) => (raw += chunk));
+    return req.on('end', () => {
+      uploadedAttachment = JSON.parse(raw || '{}');
+      return send(200, { id: 'attUPLOAD00000001', url: 'https://example.invalid/upload' });
+    });
+  }
+
   if (url.pathname.startsWith('/gemini/models/')) {
     let raw = '';
     req.on('data', (chunk) => (raw += chunk));
@@ -200,7 +214,7 @@ const stub = http.createServer((req, res) => {
 
   assert.equal(req.headers.authorization, 'Bearer test-airtable-token', 'Airtable token must be sent');
 
-  const table = parts[2];
+  const table = decodeURIComponent(parts[2] || '');
   const recordId = parts[3];
 
   if (table === 'Messages') {
@@ -218,6 +232,41 @@ const stub = http.createServer((req, res) => {
       });
     }
     return send(200, { records: [...messages.values()] });
+  }
+
+  if (table === 'Method uploads') {
+    if (req.method === 'POST') {
+      let raw = '';
+      req.on('data', (chunk) => (raw += chunk));
+      return req.on('end', () => {
+        const fields = JSON.parse(raw || '{}').fields || {};
+        const id = `recUPL${String(nextUpload).padStart(11, '0')}`;
+        nextUpload += 1;
+        const record = { id, fields, createdTime: new Date().toISOString() };
+        uploads.set(id, record);
+        writes.push({ method: 'POST', table, fields });
+        return send(200, record);
+      });
+    }
+    if (req.method === 'PATCH' && recordId) {
+      let raw = '';
+      req.on('data', (chunk) => (raw += chunk));
+      return req.on('end', () => {
+        const fields = JSON.parse(raw || '{}').fields || {};
+        const record = uploads.get(recordId);
+        if (record) Object.assign(record.fields, fields);
+        writes.push({ method: 'PATCH', table, recordId, fields });
+        return send(200, { id: recordId, fields });
+      });
+    }
+    const uploadFormula = decodeURIComponent(url.searchParams.get('filterByFormula') || '');
+    const approvedOnly = uploadFormula.includes("'Approved'");
+    const rows = [...uploads.values()].filter(
+      (record) =>
+        (!uploadFormula || uploadFormula.includes(String(record.fields.Email || ''))) &&
+        (!approvedOnly || record.fields.Status === 'Approved'),
+    );
+    return send(200, { records: rows });
   }
 
   if (table === 'Members') {
@@ -273,9 +322,24 @@ const origin = `http://127.0.0.1:${stub.address().port}`;
 ISO_RECORD.fields.File[0].url = `${origin}/iso-1833-17.pdf`;
 AATCC_RECORD.fields.File[0].url = `${origin}/aatcc-tm20a.pdf`;
 
+/** Minimal KV namespace stand-in: the invitation store (codes, trials, invite counts). */
+const inviteKv = (() => {
+  const store = new Map();
+  return {
+    store,
+    async get(key) {
+      return store.has(key) ? store.get(key) : null;
+    },
+    async put(key, value) {
+      store.set(key, String(value));
+    },
+  };
+})();
+
 const env = {
   AIRTABLE_TOKEN: 'test-airtable-token',
   AIRTABLE_BASE_ID: BASE,
+  INVITES: inviteKv,
   AIRTABLE_METHODS_TABLE: 'ISO,AATCC',
   AIRTABLE_MEMBERS_TABLE: 'Members',
   FIREBASE_PROJECT_ID: PROJECT_ID,
@@ -291,6 +355,8 @@ const env = {
   GEMINI_MODEL: 'gemini-test',
   GEMINI_API_BASE: `${origin}/gemini`,
   GEMINI_RPM: '100',
+  AIRTABLE_UPLOADS_TABLE: 'Method uploads',
+  AIRTABLE_CONTENT_API: `${origin}/content`,
 };
 
 const handle = createProxy({ env });
@@ -453,6 +519,7 @@ await check('/api/me returns the level and the Google profile', async () => {
     lastName: 'One',
     photoUrl: 'https://lh3.googleusercontent.com/a/member',
     role: 'Admin',
+    proUntil: null,
     usage: {
       date: new Date().toISOString().slice(0, 10),
       viewsLimit: 50,
@@ -1364,6 +1431,218 @@ await check('unregistering clears the device token', async () => {
   assert.equal(row.fields['FCM registered'], 'No');
   const me = await call('/api/notifications/me', { token: memberToken });
   assert.equal(me.body.registered, false);
+});
+
+// ---------------------------------------------------------------------------
+// Invitation codes: one per member, redeemed once, 7 days of Pro for both sides
+// ---------------------------------------------------------------------------
+
+const inviterToken = mintToken(googleClaims('inviter@example.com', 'Ivy', 'Inviter', ''));
+const inviteeToken = mintToken(googleClaims('invitee@example.com', 'Ian', 'Invitee', ''));
+
+await check('/api/invite hands each member a stable code', async () => {
+  assert.ok((await call('/api/me', { token: inviterToken })).status === 200, 'the inviter joins');
+  const first = await call('/api/invite', { token: inviterToken });
+  assert.equal(first.status, 200, JSON.stringify(first.body));
+  assert.match(String(first.body.code), /^[A-Z2-9]{4}-[A-Z2-9]{4}$/, first.body.code);
+  assert.equal(first.body.trialDays, 7);
+  assert.equal(first.body.invites, 0);
+  assert.equal(first.body.redeemed, false);
+  assert.equal(first.body.level, 'basic');
+  const again = await call('/api/invite', { token: inviterToken });
+  assert.equal(again.body.code, first.body.code, 'the code must not change between requests');
+});
+
+await check('a new member redeeming a code gives both sides 7 days of Pro', async () => {
+  await call('/api/me', { token: inviteeToken });
+  const code = (await call('/api/invite', { token: inviterToken })).body.code;
+  const before = Date.now();
+  // Typed in lower case and without the dash: the Worker normalises it.
+  const redeemed = await call('/api/invite/redeem', {
+    token: inviteeToken,
+    method: 'POST',
+    body: { code: code.toLowerCase().replace('-', ' ') },
+  });
+  assert.equal(redeemed.status, 200, JSON.stringify(redeemed.body));
+  assert.equal(redeemed.body.level, 'pro');
+  assert.equal(redeemed.body.inviter.email, 'inviter@example.com');
+  const days = (Date.parse(redeemed.body.proUntil) - before) / 86400000;
+  assert.ok(days > 6.9 && days < 7.1, `the trial must be 7 days, got ${days}`);
+
+  const invitee = await call('/api/me', { token: inviteeToken });
+  assert.equal(invitee.body.level, 'pro');
+  assert.equal(invitee.body.levelLabel, 'Pro');
+  assert.equal(invitee.body.usage.viewsLimit, 20, 'Pro allowance applies at once');
+  assert.equal(invitee.body.usage.downloadsLimit, 5);
+  assert.ok(invitee.body.proUntil, 'the app is told when the trial ends');
+
+  const inviter = await call('/api/me', { token: inviterToken });
+  assert.equal(inviter.body.level, 'pro');
+  assert.equal(inviter.body.usage.viewsLimit, 20);
+  assert.ok(inviter.body.proUntil);
+
+  const registered = await call('/api/invite', { token: inviterToken });
+  assert.equal(registered.body.invites, 1, 'the inviter sees one successful invitation');
+
+  assert.equal(members.get('invitee@example.com').fields.Level, 'Basic', 'the Airtable row keeps its Basic level');
+  assert.equal(members.get('inviter@example.com').fields.Level, 'Basic');
+  const inviteeIds = [
+    members.get('inviter@example.com').id,
+    members.get('invitee@example.com').id,
+  ].map(String);
+  const trialWrites = writes.filter(
+    (write) =>
+      write.method === 'PATCH' &&
+      write.fields.Level !== undefined &&
+      inviteeIds.includes(String(write.recordId)),
+  );
+  assert.equal(trialWrites.length, 0, 'the trial must not be written to the Members table');
+});
+
+await check('a second redemption is refused', async () => {
+  const code = (await call('/api/invite', { token: inviterToken })).body.code;
+  const redeemed = await call('/api/invite/redeem', {
+    token: inviteeToken,
+    method: 'POST',
+    body: { code },
+  });
+  assert.equal(redeemed.status, 409);
+  assert.equal(redeemed.body.error, 'invite_already_used');
+});
+
+await check('a member cannot redeem their own code', async () => {
+  const own = (await call('/api/invite', { token: inviteeToken })).body.code;
+  const redeemed = await call('/api/invite/redeem', { token: inviteeToken, method: 'POST', body: { code: own } });
+  assert.equal(redeemed.status, 400);
+  assert.equal(redeemed.body.error, 'own_invite_code');
+});
+
+await check('an unknown or malformed code is refused', async () => {
+  const unknown = await call('/api/invite/redeem', {
+    token: inviterToken,
+    method: 'POST',
+    body: { code: 'ZZZZ-ZZZZ' },
+  });
+  assert.equal(unknown.status, 404);
+  assert.equal(unknown.body.error, 'unknown_invite_code');
+  const malformed = await call('/api/invite/redeem', { token: inviterToken, method: 'POST', body: { code: 'hi' } });
+  assert.equal(malformed.status, 400);
+  assert.equal(malformed.body.error, 'invalid_invite_code');
+});
+
+await check('the trial lifts a Basic member and expires on its own', async () => {
+  const key = 'member:invitee@example.com';
+  const state = JSON.parse(inviteKv.store.get(key));
+  inviteKv.store.set(
+    key,
+    JSON.stringify({ ...state, proUntil: new Date(Date.now() - 1000).toISOString() }),
+  );
+  const me = await call('/api/me', { token: inviteeToken });
+  assert.equal(me.body.level, 'basic', 'an expired trial must fall back to the stored level');
+  assert.equal(me.body.usage.viewsLimit, 5);
+  assert.equal(me.body.proUntil, null);
+});
+
+await check('invitation codes answer 503 while the KV binding is missing', async () => {
+  const withoutKv = createProxy({ env: { ...env, INVITES: undefined } });
+  const response = await withoutKv(
+    new Request(`${base}/api/invite`, { headers: { Authorization: `Bearer ${inviterToken}` } }),
+  );
+  const body = await response.json();
+  assert.equal(response.status, 503, JSON.stringify(body));
+  assert.equal(body.error, 'invites_unavailable');
+  // The rest of the proxy keeps working without it.
+  const me = await withoutKv(
+    new Request(`${base}/api/me`, { headers: { Authorization: `Bearer ${inviterToken}` } }),
+  );
+  assert.equal(me.status, 200);
+  await me.text();
+});
+
+// ---------------------------------------------------------------------------
+// Method uploads and the Pro trial an approved upload earns
+// ---------------------------------------------------------------------------
+
+const uploaderToken = mintToken(googleClaims('uploader@example.com', 'Uma', 'Uploader', ''));
+const SMALL_PDF = Buffer.from('%PDF-1.4\n% upload selftest\n').toString('base64');
+
+await check('a method upload needs a member token and a title', async () => {
+  const anonymous = await call('/api/method-uploads', {
+    method: 'POST',
+    body: { title: 'ISO 105-C06', file: SMALL_PDF, contentType: 'application/pdf' },
+  });
+  assert.equal(anonymous.status, 401);
+
+  await call('/api/me', { token: uploaderToken });
+  const noTitle = await call('/api/method-uploads', {
+    token: uploaderToken,
+    method: 'POST',
+    body: { title: ' a ', file: SMALL_PDF, contentType: 'application/pdf' },
+  });
+  assert.equal(noTitle.status, 400, JSON.stringify(noTitle.body));
+  assert.equal(noTitle.body.error, 'invalid_title');
+});
+
+await check('an upload refuses a disallowed type and an oversized file', async () => {
+  const badType = await call('/api/method-uploads', {
+    token: uploaderToken,
+    method: 'POST',
+    body: { title: 'Zipped methods', file: SMALL_PDF, contentType: 'application/zip' },
+  });
+  assert.equal(badType.status, 400);
+  assert.equal(badType.body.error, 'invalid_file_type');
+
+  const oversized = Buffer.alloc(6 * 1024 * 1024).toString('base64');
+  const tooBig = await call('/api/method-uploads', {
+    token: uploaderToken,
+    method: 'POST',
+    body: { title: 'Huge method', file: oversized, contentType: 'application/pdf' },
+  });
+  assert.equal(tooBig.status, 413);
+  assert.equal(tooBig.body.error, 'file_too_large');
+});
+
+await check('a method upload is stored with the member email and its file', async () => {
+  const ok = await call('/api/method-uploads', {
+    token: uploaderToken,
+    method: 'POST',
+    body: {
+      title: 'ISO 105-C06 colour fastness to washing',
+      filename: 'ISO-105-C06.pdf',
+      contentType: 'application/pdf',
+      file: SMALL_PDF,
+    },
+  });
+  assert.equal(ok.status, 200, JSON.stringify(ok.body));
+  assert.equal(ok.body.status, 'Pending');
+
+  const record = [...uploads.values()].at(-1);
+  assert.equal(record.fields.Email, 'uploader@example.com');
+  assert.equal(record.fields.Title, 'ISO 105-C06 colour fastness to washing');
+  assert.equal(record.fields.Status, 'Pending');
+  assert.equal(uploadedAttachment.filename, 'ISO-105-C06.pdf');
+  assert.equal(uploadedAttachment.contentType, 'application/pdf');
+  assert.equal(uploadedAttachment.file, SMALL_PDF);
+});
+
+await check('an upload approved by an admin adds 1–30 days of Pro, once', async () => {
+  const record = [...uploads.values()].at(-1);
+  record.fields.Status = 'Approved';
+  record.fields.Days = 9;
+  inviteKv.store.delete('uploads:checked:uploader@example.com');
+
+  const me = await call('/api/me', { token: uploaderToken });
+  assert.equal(me.body.level, 'pro', 'the approved upload lifts Basic to Pro');
+  const days = (Date.parse(me.body.proUntil) - Date.now()) / (24 * 60 * 60 * 1000);
+  assert.ok(days > 8.9 && days < 9.1, `expected about 9 days, got ${days}`);
+  assert.equal(record.fields.Status, 'Rewarded');
+
+  record.fields.Status = 'Approved';
+  record.fields.Days = 9;
+  inviteKv.store.delete('uploads:checked:uploader@example.com');
+  const again = await call('/api/me', { token: uploaderToken });
+  const againDays = (Date.parse(again.body.proUntil) - Date.now()) / (24 * 60 * 60 * 1000);
+  assert.ok(againDays > 8.9 && againDays < 9.1, `the same row must not pay twice: ${againDays}`);
 });
 
 stub.close();

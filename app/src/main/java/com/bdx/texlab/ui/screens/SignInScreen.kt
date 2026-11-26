@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Login
@@ -26,6 +27,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -33,6 +35,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.bdx.texlab.data.AppConfig
@@ -47,6 +50,7 @@ import com.bdx.texlab.ui.AppUiState
 fun SignInScreen(
     state: AppUiState,
     onSignIn: () -> Unit,
+    onInviteCodeChange: (String) -> Unit,
     onRetryMembership: () -> Unit,
     onSignOut: () -> Unit,
 ) {
@@ -113,6 +117,8 @@ fun SignInScreen(
                 else -> SignInCard(
                     signingIn = state.signingIn,
                     error = state.authError,
+                    inviteCode = state.pendingInviteCode,
+                    onInviteCodeChange = onInviteCodeChange,
                     onSignIn = onSignIn,
                 )
             }
@@ -137,7 +143,13 @@ fun SignInScreen(
 }
 
 @Composable
-private fun SignInCard(signingIn: Boolean, error: String?, onSignIn: () -> Unit) {
+private fun SignInCard(
+    signingIn: Boolean,
+    error: String?,
+    inviteCode: String,
+    onInviteCodeChange: (String) -> Unit,
+    onSignIn: () -> Unit,
+) {
     Card(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(20.dp)) {
         Column(
             modifier = Modifier.padding(20.dp),
@@ -152,6 +164,22 @@ private fun SignInCard(signingIn: Boolean, error: String?, onSignIn: () -> Unit)
                 text = "Continue with Google. First-time accounts join the member list as Basic members, " +
                     "with your name, first/last name and profile photo from your Google account.",
                 style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedTextField(
+                value = inviteCode,
+                onValueChange = onInviteCodeChange,
+                label = { Text("Invitation code (optional)") },
+                placeholder = { Text("ABCD-EFGH") },
+                singleLine = true,
+                enabled = !signingIn,
+                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Text(
+                text = "Have a code from a colleague? Enter it before you continue: you both get " +
+                    "7 days of Pro.",
+                style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             error?.let {

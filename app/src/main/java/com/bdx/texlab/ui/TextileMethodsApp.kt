@@ -22,6 +22,8 @@ import com.bdx.texlab.ui.screens.AdminConsoleScreen
 import com.bdx.texlab.ui.screens.AdminMemberSheet
 import com.bdx.texlab.ui.screens.ContactAdminScreen
 import com.bdx.texlab.ui.screens.HomeScreen
+import com.bdx.texlab.ui.screens.InviteDialog
+import com.bdx.texlab.ui.screens.MembershipDialog
 import com.bdx.texlab.ui.screens.MethodDetailScreen
 import com.bdx.texlab.ui.screens.MethodListScreen
 import com.bdx.texlab.ui.screens.NotificationHistoryScreen
@@ -29,6 +31,7 @@ import com.bdx.texlab.ui.screens.ForcedUpdateScreen
 import com.bdx.texlab.ui.screens.SetupScreen
 import com.bdx.texlab.ui.screens.SignInScreen
 import com.bdx.texlab.ui.screens.UpdateDialog
+import com.bdx.texlab.ui.screens.UpgradeScreen
 import com.bdx.texlab.ui.screens.ViewerScreen
 
 @Composable
@@ -54,6 +57,7 @@ fun TexLabApp(viewModel: AppViewModel, activity: Activity) {
         else -> SignInScreen(
             state = state,
             onSignIn = { viewModel.signIn(activity) },
+            onInviteCodeChange = viewModel::setPendingInviteCode,
             onRetryMembership = viewModel::retryMembership,
             onSignOut = viewModel::signOut,
         )
@@ -88,11 +92,30 @@ private fun MemberArea(state: AppUiState, viewModel: AppViewModel) {
                 onRefresh = viewModel::loadMethods,
                 onTogglePush = viewModel::setPushEnabled,
                 onOpenAdmin = { navController.navigate("admin") },
+                onOpenInvite = viewModel::openInvite,
+                onOpenMembership = viewModel::openMembership,
                 onOpenContact = { navController.navigate("contact") },
                 onOpenAbout = { navController.navigate("about") },
                 onOpenNotifications = { navController.navigate("notifications") },
+                onDismissInviteNotice = viewModel::dismissInviteNotice,
                 unseenNotifications = unseenNotifications,
                 onSignOut = viewModel::signOut,
+            )
+        }
+
+        // Opened from the home header's membership badge: the plan, the invitation code and the
+        // method-upload form that earns 1–30 days of Pro.
+        composable("upgrade") {
+            LaunchedEffect(Unit) { viewModel.loadInviteCode() }
+            UpgradeScreen(
+                state = state,
+                onBack = { navController.popBackStack() },
+                onCodeChange = viewModel::setRedeemCode,
+                onRedeem = viewModel::redeemInviteFromDialog,
+                onUploadTitleChange = viewModel::setUploadTitle,
+                onSelectFile = viewModel::selectUploadFile,
+                onClearFile = viewModel::clearUploadFile,
+                onSubmitUpload = viewModel::submitMethodUpload,
             )
         }
 
@@ -211,5 +234,27 @@ private fun MemberArea(state: AppUiState, viewModel: AppViewModel) {
                 preparePdf = { target, progress -> viewModel.preparePdf(target, progress) },
             )
         }
+    }
+
+    // Opened from the home header's badge; drawn above the nav graph like the invite dialog.
+    if (state.showMembership) {
+        MembershipDialog(
+            state = state,
+            onUpgrade = {
+                viewModel.closeMembership()
+                navController.navigate("upgrade")
+            },
+            onDismiss = viewModel::closeMembership,
+        )
+    }
+
+    // Opened from the corner menu; drawn above the nav graph so the screen underneath stays put.
+    if (state.invite.open) {
+        InviteDialog(
+            state = state.invite,
+            onCodeChange = viewModel::setRedeemCode,
+            onRedeem = viewModel::redeemInviteFromDialog,
+            onDismiss = viewModel::closeInvite,
+        )
     }
 }

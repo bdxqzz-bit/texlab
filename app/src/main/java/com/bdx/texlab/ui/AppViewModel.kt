@@ -2,7 +2,9 @@ package com.bdx.texlab.ui
 
 import android.app.Activity
 import android.app.Application
+import android.net.Uri
 import android.os.Build
+import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.bdx.texlab.BuildConfig
@@ -13,6 +15,7 @@ import com.bdx.texlab.data.AdminRole
 import com.bdx.texlab.data.AdminSendResult
 import com.bdx.texlab.data.AdminTarget
 import com.bdx.texlab.data.AppConfig
+import com.bdx.texlab.data.InviteInfo
 import com.bdx.texlab.data.MemberMessage
 import com.bdx.texlab.data.MembershipLevel
 import com.bdx.texlab.data.MemberStatus
@@ -30,14 +33,17 @@ import com.bdx.texlab.update.ApkInstaller
 import com.bdx.texlab.update.InstallResult
 import com.google.firebase.FirebaseApp
 import com.google.firebase.messaging.FirebaseMessaging
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
+import java.io.IOException
 
 data class DownloadStatus(
     val inProgress: Boolean = false,
@@ -136,6 +142,56 @@ data class UpdateUiState(
         get() = info != null && (forced || !dismissed)
 }
 
+/**
+ * The invitation dialog opened from the home screen's corner menu: the member's own code, the
+ * field for a colleague's code, and one notice line about the last redemption.
+ */
+data class InviteUiState(
+    val open: Boolean = false,
+    val loading: Boolean = false,
+    val info: InviteInfo = InviteInfo(),
+    val error: String? = null,
+    val codeInput: String = "",
+    val redeeming: Boolean = false,
+    /** Shown on the home screen after a code typed at sign-in was redeemed. */
+    val notice: String? = null,
+)
+
+/** The most one method upload may carry; the Worker and Airtable enforce the same limit. */
+const val MAX_UPLOAD_BYTES = 5 * 1024 * 1024
+
+/** File types the uploads table accepts. Mirrors the Worker's UPLOAD_CONTENT_TYPES. */
+private val UPLOAD_CONTENT_TYPES = setOf(
+    "application/pdf",
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "text/plain",
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+)
+
+/** What the app knows about a chosen file before it is sent, and the submit result. */
+data class UploadUiState(
+    val title: String = "",
+    val uri: Uri? = null,
+    val fileName: String = "",
+    val contentType: String = "",
+    val size: Long = 0,
+    val submitting: Boolean = false,
+    val error: String? = null,
+    val success: String? = null,
+) {
+    val canSubmit: Boolean
+        get() = !submitting && uri != null && title.trim().length >= 3 && size <= MAX_UPLOAD_BYTES
+
+    val sizeLabel: String?
+        get() = size.takeIf { it > 0 }?.let { bytes ->
+            if (bytes >= 1024 * 1024) "%.1f MB".format(bytes / (1024f * 1024f))
+            else "%d KB".format((bytes / 1024).coerceAtLeast(1))
+        }
+}
+
 data class AppUiState(
     val setupProblems: List<String> = emptyList(),
     val phase: Phase = Phase.Loading,
@@ -163,6 +219,13 @@ data class AppUiState(
     val pushEnabled: Boolean = false,
     val pushBusy: Boolean = false,
     val pushError: String? = null,
+    /** Code typed on the sign-in screen; redeemed once the new account is confirmed as a member. */
+    val pendingInviteCode: String = "",
+    val invite: InviteUiState = InviteUiState(),
+    /** The membership card opened from the home header's level badge. */
+    val showMembership: Boolean = false,
+    /** The method/document upload form on the upgrade screen. */
+    val upload: UploadUiState = UploadUiState(),
     /** True only for an admin role, so the console entry point is never shown to a member. */
     val isAdmin: Boolean = false,
     val admin: AdminUiState = AdminUiState(),
@@ -426,6 +489,250 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         _state.update { it.copy(message = null) }
     }
 
+    // -------------------------------------------------------------- invitation codes
+
+    /** Keeps the optional code typed at sign-up until the account is verified as a member. */
+    fun setPendingInviteCode(code: String) {
+        _state.update { it.copy(pendingInviteCode = code.uppercase().take(12)) }
+    }
+
+    /** Opens the invite dialog and loads the member's code the first time. */
+    fun openInvite() {
+        _state.update { it.copy(invite = it.invite.copy(open = true, error = null)) }
+        if (_state.value.invite.info.code.isBlank()) loadInvite()
+    }
+
+    fun closeInvite() {
+        _state.update { it.copy(invite = it.invite.copy(open = false, error = null)) }
+    }
+
+    /** Loads the member's own code without opening the dialog (the upgrade screen shows it inline). */
+    fun loadInviteCode() {
+        if (_state.value.invite.info.code.isBlank()) loadInvite()
+    }
+
+    // ------------------------------------------------- membership badge and method uploads
+
+    fun openMembership() {
+        _state.update { it.copy(showMembership = true) }
+    }
+
+    fun closeMembership() {
+        _state.update { it.copy(showMembership = false) }
+    }
+
+    fun setUploadTitle(title: String) {
+        _state.update {
+            it.copy(upload = it.upload.copy(title = title.take(150), error = null, success = null))
+        }
+    }
+
+    /**
+     * Remembers the document the member picked. The URI is read only when they submit, so a large
+     * file does not sit in memory while the form is open.
+     */
+    fun selectUploadFile(uri: Uri) {
+        val resolver = getApplication<Application>().contentResolver
+        var name = ""
+        var size = 0L
+        runCatching {
+            resolver.query(uri, null, null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (nameIndex >= 0) name = cursor.getString(nameIndex).orEmpty()
+                    val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
+                    if (sizeIndex >= 0 && !cursor.isNull(sizeIndex)) size = cursor.getLong(sizeIndex)
+                }
+            }
+        }
+        val type = resolver.getType(uri).orEmpty().lowercase()
+        val contentType = if (type.isNotBlank()) {
+            type
+        } else {
+            when {
+                name.endsWith(".pdf", true) -> "application/pdf"
+                name.endsWith(".docx", true) ->
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                name.endsWith(".doc", true) -> "application/msword"
+                name.endsWith(".txt", true) -> "text/plain"
+                name.endsWith(".png", true) -> "image/png"
+                name.endsWith(".webp", true) -> "image/webp"
+                name.endsWith(".jpg", true) || name.endsWith(".jpeg", true) -> "image/jpeg"
+                else -> ""
+            }
+        }
+        val error = when {
+            contentType !in UPLOAD_CONTENT_TYPES -> "Choose a PDF, Word document, text file or image."
+            size > MAX_UPLOAD_BYTES -> "Keep the file under 5 MB."
+            else -> null
+        }
+        _state.update {
+            it.copy(
+                upload = it.upload.copy(
+                    uri = if (error == null) uri else null,
+                    fileName = name.ifBlank { "method.pdf" },
+                    contentType = contentType,
+                    size = size,
+                    error = error,
+                    success = null,
+                ),
+            )
+        }
+    }
+
+    fun clearUploadFile() {
+        _state.update { it.copy(upload = it.upload.copy(uri = null, fileName = "", contentType = "", size = 0)) }
+    }
+
+    /** Sends the title and file to the proxy, which stores both in the uploads table. */
+    fun submitMethodUpload() {
+        val upload = _state.value.upload
+        val uri = upload.uri ?: return
+        if (upload.submitting || upload.title.trim().length < 3) return
+        _state.update { it.copy(upload = it.upload.copy(submitting = true, error = null, success = null)) }
+        viewModelScope.launch {
+            val result = runCatching {
+                withContext(Dispatchers.IO) {
+                    val resolver = getApplication<Application>().contentResolver
+                    val bytes = resolver.openInputStream(uri)?.use { it.readBytes() }
+                        ?: throw IOException("The chosen file could not be opened.")
+                    if (bytes.size > MAX_UPLOAD_BYTES) throw IOException("Keep the file under 5 MB.")
+                    proxyClient.uploadMethod(
+                        title = upload.title.trim(),
+                        filename = upload.fileName.ifBlank { "method.pdf" },
+                        contentType = upload.contentType,
+                        bytes = bytes,
+                    )
+                }
+            }
+            result
+                .onSuccess { answer ->
+                    _state.update {
+                        it.copy(
+                            upload = UploadUiState(
+                                success = answer.note.ifBlank {
+                                    "Thanks — your method is waiting for review."
+                                },
+                            ),
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    _state.update {
+                        it.copy(
+                            upload = it.upload.copy(
+                                submitting = false,
+                                error = error.message ?: "The upload failed. Try again.",
+                            ),
+                        )
+                    }
+                }
+        }
+    }
+
+    fun dismissInviteNotice() {
+        _state.update { it.copy(invite = it.invite.copy(notice = null)) }
+    }
+
+    /** Text in the dialog's "Add a friend's code" field. */
+    fun setRedeemCode(code: String) {
+        _state.update {
+            it.copy(invite = it.invite.copy(codeInput = code.uppercase().take(12), error = null))
+        }
+    }
+
+    fun redeemInviteFromDialog() {
+        redeemInviteCode(_state.value.invite.codeInput.trim(), fromDialog = true)
+    }
+
+    private fun loadInvite() {
+        if (_state.value.invite.loading) return
+        _state.update { it.copy(invite = it.invite.copy(loading = true, error = null)) }
+        viewModelScope.launch {
+            runCatching { proxyClient.invite() }
+                .onSuccess { info ->
+                    _state.update { it.copy(invite = it.invite.copy(loading = false, info = info)) }
+                }
+                .onFailure { error ->
+                    _state.update {
+                        it.copy(
+                            invite = it.invite.copy(
+                                loading = false,
+                                error = error.message ?: "Could not load your invitation code.",
+                            ),
+                        )
+                    }
+                }
+        }
+    }
+
+    /**
+     * Redeems someone else's code. From the dialog a failure is shown there; from sign-in it is
+     * shown as the home screen notice, so a typo is never silent.
+     */
+    private fun redeemInviteCode(code: String, fromDialog: Boolean) {
+        val current = _state.value
+        if (code.isBlank() || current.invite.redeeming) return
+        _state.update { it.copy(invite = it.invite.copy(redeeming = true, error = null)) }
+        viewModelScope.launch {
+            runCatching { proxyClient.redeemInvite(code) }
+                .onSuccess { result ->
+                    val until = result.proUntilLabel ?: "the end of the trial"
+                    val notice = "Invitation accepted — you and the member who invited you both " +
+                        "have ${result.trialDays} days of Pro, until $until."
+                    _state.update { state ->
+                        state.copy(
+                            level = result.level,
+                            pendingInviteCode = "",
+                            invite = state.invite.copy(
+                                open = if (fromDialog) false else state.invite.open,
+                                redeeming = false,
+                                codeInput = "",
+                                error = null,
+                                notice = notice,
+                                info = state.invite.info.copy(
+                                    proUntil = result.proUntil,
+                                    redeemed = true,
+                                ),
+                            ),
+                        )
+                    }
+                    // The Pro allowance lives on the row the proxy read before the redemption.
+                    refreshMembership()
+                }
+                .onFailure { error ->
+                    val message = error.message ?: "The invitation code could not be redeemed."
+                    _state.update { state ->
+                        state.copy(
+                            pendingInviteCode = if (fromDialog) state.pendingInviteCode else "",
+                            invite = state.invite.copy(
+                                redeeming = false,
+                                error = if (fromDialog) message else null,
+                                notice = if (fromDialog) state.invite.notice else message,
+                            ),
+                        )
+                    }
+                }
+        }
+    }
+
+    /** Re-reads the member's level and allowance after an invite changed them. */
+    private fun refreshMembership() {
+        viewModelScope.launch {
+            val result = proxyClient.membership()
+            if (result !is MembershipResult.Approved) return@launch
+            _state.update { state ->
+                state.copy(
+                    level = result.level,
+                    quota = result.quota,
+                    invite = state.invite.copy(
+                        info = state.invite.info.copy(proUntil = result.proUntil),
+                    ),
+                )
+            }
+        }
+    }
+
     fun download(method: TestMethod) {
         if (method.pdf == null) return
         if (_state.value.downloads[method.id]?.inProgress == true) return
@@ -467,6 +774,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         _state.update { it.copy(quota = quota) }
     }
 
+    /** Keeps the chat's "questions left" line current after each answer or refusal. */
+    private fun applyAskUsage(asksLimit: Int, asksUsed: Int) {
+        if (asksLimit <= 0) return
+        _state.update { state ->
+            val quota = state.quota ?: return@update state
+            state.copy(quota = quota.copy(asksLimit = asksLimit, asksUsed = asksUsed))
+        }
+    }
+
     private fun verifyMembership(email: String, displayName: String?) {
         _state.update {
             it.copy(
@@ -497,6 +813,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     loadMethods()
                     syncPushToken()
+                    // A code typed on the sign-in screen is redeemed as soon as the new row exists.
+                    _state.value.pendingInviteCode.trim()
+                        .takeIf { it.isNotEmpty() }
+                        ?.let { code -> redeemInviteCode(code, fromDialog = false) }
                 }
 
                 MembershipResult.NotAMember -> {
@@ -859,11 +1179,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             runCatching { proxyClient.askDocument(methodId, text, history) }
                 .onSuccess { answer ->
+                    applyAskUsage(answer.asksLimit, answer.asksUsed)
                     _state.update { state ->
                         state.copy(
                             chat = state.chat.copy(
                                 messages = state.chat.messages +
-                                    DocumentChatMessage(fromMember = false, text = answer),
+                                    DocumentChatMessage(fromMember = false, text = answer.text),
                                 sending = false,
                                 error = null,
                             ),
@@ -871,6 +1192,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
                 .onFailure { error ->
+                    // A refused question still reports today's counters, so the chat can show 0 left.
+                    (error as? ProxyException)?.quota?.let(::applyQuota)
                     _state.update { state ->
                         state.copy(
                             chat = state.chat.copy(

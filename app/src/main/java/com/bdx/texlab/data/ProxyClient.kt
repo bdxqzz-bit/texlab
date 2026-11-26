@@ -1,5 +1,6 @@
 package com.bdx.texlab.data
 
+import android.util.Base64
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
@@ -55,6 +56,8 @@ private data class UsageDto(
     val viewsUsed: Int = 0,
     val downloadsLimit: Int = 0,
     val downloadsUsed: Int = 0,
+    val asksLimit: Int = 0,
+    val asksUsed: Int = 0,
 )
 
 @Serializable
@@ -67,6 +70,7 @@ private data class MemberResponse(
     val lastName: String? = null,
     val photoUrl: String? = null,
     val usage: UsageDto? = null,
+    val proUntil: String? = null,
 )
 
 @Serializable
@@ -105,6 +109,52 @@ private data class MemberMessageDto(
 private data class ChatTurnDto(val role: String, val text: String)
 
 @Serializable
+private data class InviteResponse(
+    val code: String = "",
+    val proUntil: String? = null,
+    val trialDays: Int = 7,
+    val invites: Int = 0,
+    val redeemed: Boolean = false,
+)
+
+@Serializable
+private data class RedeemInviteBody(val code: String)
+
+@Serializable
+private data class RedeemInviteResponse(
+    val ok: Boolean = false,
+    val proUntil: String? = null,
+    val trialDays: Int = 7,
+    val level: String? = null,
+    val levelLabel: String? = null,
+)
+
+/** What a successful redemption changed: the member's new level and when the trial ends. */
+data class InviteRedeemResult(
+    val level: MembershipLevel,
+    val proUntil: String? = null,
+    val trialDays: Int = 7,
+) {
+    val proUntilLabel: String? get() = InviteInfo(proUntil = proUntil).proUntilLabel
+}
+
+@Serializable
+private data class MethodUploadBody(
+    val title: String,
+    val filename: String,
+    val contentType: String,
+    val file: String,
+)
+
+@Serializable
+private data class MethodUploadResponse(
+    val ok: Boolean = false,
+    val id: String = "",
+    val status: String = "",
+    val note: String = "",
+)
+
+@Serializable
 private data class AskDocumentBody(
     val methodId: String,
     val question: String,
@@ -112,7 +162,17 @@ private data class AskDocumentBody(
 )
 
 @Serializable
-private data class DocumentAnswerResponse(val answer: String = "")
+private data class DocumentAnswerResponse(
+    val answer: String = "",
+    val usage: UsageDto? = null,
+)
+
+/** One assistant answer and the day's counters that came back with it. */
+data class DocumentAnswer(
+    val text: String,
+    val asksLimit: Int = 0,
+    val asksUsed: Int = 0,
+)
 
 @Serializable
 private data class AdminMembersResponse(val members: List<AdminMemberDto> = emptyList())
@@ -210,6 +270,7 @@ class ProxyClient(
                             lastName = member.lastName?.trim().orEmpty(),
                             photoUrl = member.photoUrl?.trim()?.takeIf { it.startsWith("http") },
                             quota = member.usage?.toQuota(member.level),
+                            proUntil = member.proUntil,
                         )
                     }
 
@@ -340,6 +401,68 @@ class ProxyClient(
     }
 
     /**
+     * The member's own invitation code, with the number of members who joined with it and any
+     * running Pro trial. The proxy creates the code the first time it is asked for.
+     */
+    suspend fun invite(): InviteInfo = withContext(Dispatchers.IO) {
+        http.newCall(request("/api/invite")).execute().use { response ->
+            val body = response.body?.string().orEmpty()
+            if (!response.isSuccessful) throw ProxyException(describe(response.code, body), response.code)
+            val dto = json.decodeFromString<InviteResponse>(body)
+            InviteInfo(
+                code = dto.code,
+                proUntil = dto.proUntil,
+                trialDays = dto.trialDays,
+                invites = dto.invites,
+                redeemed = dto.redeemed,
+            )
+        }
+    }
+
+    /**
+     * Redeems a colleague's invitation code. Both members get [trialDays] of Pro; the proxy refuses
+     * a code that does not exist, the member's own code, and a second redemption.
+     */
+    suspend fun redeemInvite(code: String): InviteRedeemResult = withContext(Dispatchers.IO) {
+        val payload = json.encodeToString(RedeemInviteBody.serializer(), RedeemInviteBody(code = code))
+        val raw = post("/api/invite/redeem", payload)
+        val dto = json.decodeFromString<RedeemInviteResponse>(raw)
+        InviteRedeemResult(
+            level = MembershipLevel.from(dto.level ?: dto.levelLabel),
+            proUntil = dto.proUntil,
+            trialDays = dto.trialDays,
+        )
+    }
+
+    /**
+     * Submits one method/document for review. The Worker stores it in the uploads table with the
+     * signed-in member's verified email and attaches the file itself; an administrator then
+     * approves it with 1–30 days of Pro.
+     */
+    suspend fun uploadMethod(
+        title: String,
+        filename: String,
+        contentType: String,
+        bytes: ByteArray,
+    ): MethodUploadResult = withContext(Dispatchers.IO) {
+        val payload = json.encodeToString(
+            MethodUploadBody.serializer(),
+            MethodUploadBody(
+                title = title,
+                filename = filename,
+                contentType = contentType,
+                file = Base64.encodeToString(bytes, Base64.NO_WRAP),
+            ),
+        )
+        val raw = post("/api/method-uploads", payload)
+        val response = json.decodeFromString<MethodUploadResponse>(raw)
+        MethodUploadResult(
+            status = response.status.ifBlank { "Pending" },
+            note = response.note,
+        )
+    }
+
+    /**
      * The member inbox for the admin console. Admin-only on the proxy, newest message first.
      */
     suspend fun adminMessages(): List<MemberMessage> = withContext(Dispatchers.IO) {
@@ -363,7 +486,7 @@ class ProxyClient(
         methodId: String,
         question: String,
         history: List<Pair<String, String>> = emptyList(),
-    ): String = withContext(Dispatchers.IO) {
+    ): DocumentAnswer = withContext(Dispatchers.IO) {
         val payload = json.encodeToString(
             AskDocumentBody.serializer(),
             AskDocumentBody(
@@ -373,7 +496,12 @@ class ProxyClient(
             ),
         )
         val raw = post("/api/documents/ask", payload)
-        json.decodeFromString<DocumentAnswerResponse>(raw).answer.trim()
+        val response = json.decodeFromString<DocumentAnswerResponse>(raw)
+        DocumentAnswer(
+            text = response.answer.trim(),
+            asksLimit = response.usage?.asksLimit ?: 0,
+            asksUsed = response.usage?.asksUsed ?: 0,
+        )
     }
 
     /**
@@ -457,7 +585,7 @@ class ProxyClient(
         http.newCall(request).execute().use { response ->
             val text = response.body?.string().orEmpty()
             if (!response.isSuccessful) {
-                throw ProxyException(describe(response.code, text), response.code)
+                throw ProxyException(describe(response.code, text), response.code, quotaFrom(response))
             }
             return text
         }
@@ -478,6 +606,8 @@ class ProxyClient(
             viewsUsed = int("X-Quota-Views-Used") ?: 0,
             downloadsLimit = int("X-Quota-Downloads-Limit") ?: 0,
             downloadsUsed = int("X-Quota-Downloads-Used") ?: 0,
+            asksLimit = int("X-Quota-Asks-Limit") ?: 0,
+            asksUsed = int("X-Quota-Asks-Used") ?: 0,
         )
     }
 
@@ -518,6 +648,8 @@ private fun UsageDto.toQuota(level: String?) = UsageQuota(
     viewsUsed = viewsUsed,
     downloadsLimit = downloadsLimit,
     downloadsUsed = downloadsUsed,
+    asksLimit = asksLimit,
+    asksUsed = asksUsed,
 )
 
 private fun MemberMessageDto.toMemberMessage() = MemberMessage(

@@ -264,6 +264,7 @@ fun MethodDetailScreen(
         DocumentChatDialog(
             methodTitle = method.title,
             chat = chat,
+            quota = quota,
             onDismiss = onDismissChat,
             onAsk = onAskDocument,
         )

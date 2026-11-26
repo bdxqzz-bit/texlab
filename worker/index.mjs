@@ -68,6 +68,10 @@
  *   APP_APK_URL              public https URL of the signed APK the app downloads. Empty means
  *                            the update route answers but no update is offered.
  *   APP_RELEASE_NOTES        default "" (short "what's new" shown in the prompt)
+ *   INVITES                  KV namespace binding that stores invitation codes and the Pro trials
+ *                            they earn. Without it the proxy answers 503 invites_unavailable and
+ *                            everything else keeps working.
+ *   INVITE_TRIAL_DAYS        default "7" days of Pro given to both members when a code is redeemed
  */
 
 const DEFAULT_GEMINI_API_BASE = 'https://generativelanguage.googleapis.com/v1beta';
@@ -172,6 +176,49 @@ export const LIMITS = {
   max: { views: 50, downloads: 20, asks: 40 },
 };
 
+/**
+ * Invitation codes: every member has one, shown under the app's ⋮ menu. A member who signs up and
+ * redeems someone else's code gives **both** sides this many days of Pro. The trial is a level
+ * overlay kept in KV, so no extra Airtable column is needed and an administrator's own Level is
+ * never rewritten.
+ */
+export const INVITE_TRIAL_DAYS = 7;
+
+/** No 0/O or 1/I, so a code read out loud or typed by hand cannot be mistyped into another one. */
+const INVITE_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const INVITE_CODE_LENGTH = 8;
+
+/** Accepts a code however it was typed or pasted: lower case, spaces, or with a dash. */
+export function normaliseInviteCode(value) {
+  return String(value ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
+/** The display form, e.g. `TX4K-7Q2M`; anything else is returned unchanged. */
+export function formatInviteCode(code) {
+  const clean = normaliseInviteCode(code);
+  return clean.length === INVITE_CODE_LENGTH ? `${clean.slice(0, 4)}-${clean.slice(4)}` : clean;
+}
+
+/** A fresh random code. Randomness comes from the platform, never from a counter or the email. */
+function randomInviteCode() {
+  const bytes = new Uint8Array(INVITE_CODE_LENGTH);
+  crypto.getRandomValues(bytes);
+  let code = '';
+  for (const byte of bytes) code += INVITE_CODE_ALPHABET[byte % INVITE_CODE_ALPHABET.length];
+  return code;
+}
+
+/**
+ * The level a member actually gets: a running invite trial lifts Basic to Pro, and never lowers a
+ * Pro or Max an administrator granted.
+ */
+export function effectiveLevel(storedLevel, proUntilMs, nowMs = Date.now()) {
+  const base = normaliseLevel(storedLevel);
+  const until = Number(proUntilMs);
+  if (base === 'basic' && Number.isFinite(until) && until > nowMs) return 'pro';
+  return base;
+}
+
 /** Members-table columns holding today's usage. */
 export const USAGE_FIELDS = {
   date: 'Usage date',
@@ -213,6 +260,47 @@ export const MESSAGE_KINDS = { report: 'Report', request: 'Request' };
 
 /** A new row starts here; an admin changes it in Airtable once the message is handled. */
 export const MESSAGE_NEW_STATUS = 'New';
+
+/**
+ * Columns on the method-uploads table: one row per method/document a member submits for review,
+ * with the file itself in an attachment field. The Worker creates the row with the member's
+ * verified email and the review columns left empty; an administrator then sets Status to
+ * `Approved` and Days to 1–30, and the Worker turns that into a Pro trial on the next request.
+ */
+export const UPLOAD_FIELDS = {
+  title: 'Title',
+  email: 'Email',
+  name: 'Name',
+  file: 'File',
+  fileName: 'File name',
+  contentType: 'Content type',
+  size: 'Size',
+  status: 'Status',
+  submittedAt: 'Submitted at',
+  days: 'Days',
+  proUntil: 'Pro until',
+};
+
+/** A new upload starts here; an admin moves it to `Approved` (with Days) or `Rejected`. */
+export const UPLOAD_NEW_STATUS = 'Pending';
+
+/** The most one upload may carry. Airtable's attachment limit is 5 MB per file. */
+export const UPLOAD_MAX_BYTES = 5 * 1024 * 1024;
+
+/** Files Airtable accepts as an attachment and a lab would actually submit. */
+export const UPLOAD_CONTENT_TYPES = new Set([
+  'application/pdf',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'text/plain',
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+]);
+
+/** The Pro trial an approved upload earns is between these two many days. */
+export const UPLOAD_TRIAL_MIN_DAYS = 1;
+export const UPLOAD_TRIAL_MAX_DAYS = 30;
 
 /** Method columns the document assistant reads, in the order they are presented to the model. */
 const DOCUMENT_CONTEXT_FIELDS = [
@@ -506,6 +594,11 @@ export function readConfig(env = {}) {
     appMinSupported: positiveInt(env.APP_MIN_SUPPORTED, 1),
     appApkUrl: String(env.APP_APK_URL || '').trim(),
     appReleaseNotes: String(env.APP_RELEASE_NOTES || '').trim(),
+    invitesKv: env.INVITES || null,
+    inviteTrialDays: positiveInt(env.INVITE_TRIAL_DAYS, INVITE_TRIAL_DAYS),
+    uploadsTable: String(env.AIRTABLE_UPLOADS_TABLE || 'Method uploads').trim(),
+    uploadContentApi: String(env.AIRTABLE_CONTENT_API || 'https://content.airtable.com/v0')
+      .replace(/\/+$/, ''),
   };
 }
 
@@ -1039,8 +1132,10 @@ async function airtableWrite({
       response.status === 401 || response.status === 403
                   ? 'AIRTABLE_TOKEN needs the data.records:write scope on the target table.'
         : response.status === 422
-          ? 'Airtable rejected the membership fields; check the Members column names.'
-          : `Airtable write failed (HTTP ${response.status}).`;
+          ? 'Airtable rejected the fields; check the table and its column names.'
+          : response.status === 404
+            ? 'Airtable table not found; check the table name and that it is in this base.'
+            : `Airtable write failed (HTTP ${response.status}).`;
     throw new HttpError(502, 'airtable_write_error', detail ? `${hint} ${detail}` : hint);
   }
   try {
@@ -1267,6 +1362,201 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
     else await write;
   }
 
+  // ---------------------------------------------------------------------------
+  // Invitation codes and their Pro trial  (app ↔ proxy ↔ KV)
+  // ---------------------------------------------------------------------------
+
+  const inviteKv = config.invitesKv;
+  const inviteTrialMs = config.inviteTrialDays * 24 * 60 * 60 * 1000;
+
+  /** The KV namespace, or a clear refusal when this deployment has none yet. */
+  function inviteStore() {
+    if (!inviteKv || typeof inviteKv.get !== 'function') {
+      throw new HttpError(
+        503,
+        'invites_unavailable',
+        'Invitation codes are not configured on this server yet.',
+      );
+    }
+    return inviteKv;
+  }
+
+  async function readInviteJson(key) {
+    const raw = await inviteStore().get(key);
+    if (raw && typeof raw === 'object') return raw;
+    if (typeof raw === 'string' && raw) {
+      try {
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === 'object' ? parsed : null;
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  async function writeInviteJson(key, value) {
+    await inviteStore().put(key, JSON.stringify(value));
+  }
+
+  const inviteCodeKey = (code) => `code:${normaliseInviteCode(code)}`;
+  const inviteMemberKey = (email) => `member:${String(email || '').trim().toLowerCase()}`;
+  const isoOrNull = (ms) =>
+    Number.isFinite(ms) && ms > now() ? new Date(ms).toISOString() : null;
+
+  /**
+   * A member's invitation state: their own code (created once, then stable), the number of members
+   * who joined with it, and the end of an invite-earned Pro trial.
+   */
+  async function inviteFor(email) {
+    const key = inviteMemberKey(email);
+    let state = (await readInviteJson(key)) || {};
+    if (!state.code) {
+      for (let attempt = 0; attempt < 5 && !state.code; attempt += 1) {
+        const code = randomInviteCode();
+        if (await readInviteJson(inviteCodeKey(code))) continue; // taken by another member
+        state = { ...state, code, createdAt: new Date(now()).toISOString() };
+        await writeInviteJson(inviteCodeKey(code), { email: String(email).toLowerCase() });
+        await writeInviteJson(key, state);
+      }
+      if (!state.code) {
+        throw new HttpError(503, 'invite_code_failed', 'An invitation code could not be created. Try again.');
+      }
+    }
+    return state;
+  }
+
+  /**
+   * The end of this member's invite trial as epoch ms (0 when none). A KV outage must never stop
+   * a member from reading the library, so a failure reads as "no trial".
+   */
+  async function proUntilFor(email) {
+    if (!inviteKv || typeof inviteKv.get !== 'function') return 0;
+    try {
+      const state = await readInviteJson(inviteMemberKey(email));
+      const until = Date.parse(String(state?.proUntil || ''));
+      return Number.isFinite(until) ? until : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  /** The Level column on a row, read without touching the membership cache. */
+  async function storedLevelFor(email) {
+    try {
+      const records = await airtableList({
+        config,
+        table: config.membersTable,
+        filterByFormula: `LOWER({Email})='${escapeFormulaValue(String(email).toLowerCase())}'`,
+        maxRecords: 1,
+        fetchImpl,
+        throttle: createThrottle(),
+      });
+      return normaliseLevel(firstString(records[0]?.fields || {}, LEVEL_FIELDS));
+    } catch {
+      return 'basic';
+    }
+  }
+
+  /** GET /api/invite — the signed-in member's own code and trial. */
+  async function inviteStatus(request) {
+    const { identity, membership } = await requireMember(request);
+    const email = String(identity.email || '').trim().toLowerCase();
+    const state = await inviteFor(email);
+    const proUntilMs = Date.parse(String(state.proUntil || ''));
+    const level = effectiveLevel(membership.level, proUntilMs, now());
+    return jsonResponse(
+      200,
+      {
+        code: formatInviteCode(state.code),
+        proUntil: isoOrNull(proUntilMs),
+        trialDays: config.inviteTrialDays,
+        invites: Math.max(0, Number(state.invites) || 0),
+        redeemed: Boolean(state.redeemedAt),
+        level,
+        levelLabel: levelLabel(level),
+      },
+      { Vary: 'Authorization' },
+    );
+  }
+
+  /**
+   * POST /api/invite/redeem — a member joins with someone else's code. Both sides get the trial,
+   * each member may redeem one code in their lifetime, and redeeming your own code is refused.
+   */
+  async function redeemInvite(request) {
+    const { identity, membership } = await requireMember(request);
+    const email = String(identity.email || '').trim().toLowerCase();
+    const payload = await jsonBody(request);
+    const code = normaliseInviteCode(payload?.code);
+    if (code.length !== INVITE_CODE_LENGTH) {
+      throw new HttpError(400, 'invalid_invite_code', 'Enter the 8-character invitation code.');
+    }
+
+    const invite = await readInviteJson(inviteCodeKey(code));
+    const inviterEmail = String(invite?.email || '').trim().toLowerCase();
+    if (!inviterEmail) {
+      throw new HttpError(
+        404,
+        'unknown_invite_code',
+        'That invitation code was not found. Check it with the member who sent it.',
+      );
+    }
+    if (inviterEmail === email) {
+      throw new HttpError(400, 'own_invite_code', 'That is your own code — share it with a colleague instead.');
+    }
+
+    const own = (await readInviteJson(inviteMemberKey(email))) || {};
+    if (own.redeemedAt) {
+      throw new HttpError(409, 'invite_already_used', 'You have already used an invitation code.');
+    }
+
+    const at = now();
+    const ownUntil = at + inviteTrialMs;
+    const inviterState = (await readInviteJson(inviteMemberKey(inviterEmail))) || {};
+    // Extending from the later of now and the inviter's running trial, so credits add up.
+    const inviterUntil = Math.max(Date.parse(String(inviterState.proUntil || '')) || 0, at) + inviteTrialMs;
+
+    await writeInviteJson(inviteMemberKey(inviterEmail), {
+      ...inviterState,
+      code: inviterState.code || code,
+      invites: Math.max(0, Number(inviterState.invites) || 0) + 1,
+      proUntil: new Date(inviterUntil).toISOString(),
+      lastInvitedAt: new Date(at).toISOString(),
+    });
+    await writeInviteJson(inviteMemberKey(email), {
+      ...own,
+      redeemedAt: new Date(at).toISOString(),
+      invitedBy: inviterEmail,
+      proUntil: new Date(ownUntil).toISOString(),
+    });
+
+    // Both rows must be read again on the next request, not served from the cached Basic level.
+    membershipCache.delete(email);
+    membershipCache.delete(inviterEmail);
+
+    const level = effectiveLevel(membership.level, ownUntil, at);
+    const inviterLevel = effectiveLevel(await storedLevelFor(inviterEmail), inviterUntil, at);
+    return jsonResponse(
+      200,
+      {
+        ok: true,
+        code: formatInviteCode(code),
+        level,
+        levelLabel: levelLabel(level),
+        proUntil: new Date(ownUntil).toISOString(),
+        trialDays: config.inviteTrialDays,
+        inviter: {
+          email: inviterEmail,
+          level: inviterLevel,
+          levelLabel: levelLabel(inviterLevel),
+          proUntil: new Date(inviterUntil).toISOString(),
+        },
+      },
+      { Vary: 'Authorization' },
+    );
+  }
+
   async function membershipFor(identity) {
     const email = identity.email;
     const cached = membershipCache.get(email);
@@ -1286,12 +1576,21 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
     // first request of a cache window (it never touches an existing level or name).
     if (active) await syncProfile({ config, record: active, identity, fetchImpl });
     const recordId = String(active?.id || '');
-    const value =
+    let value =
       active
         ? membershipValue(active, identity)
         : records.length > 0
           ? { member: false, level: null, levelLabel: null, name: null, role: 'Member', reason: 'inactive' }
           : membershipValue(await joinAsBasic({ config, identity, fetchImpl }), identity);
+
+    // An invite-earned or upload-earned Pro trial is layered over the stored level, never written
+    // to the row. Approved uploads are turned into days first, so they count from this response.
+    if (value.member) {
+      await grantUploadRewards(email);
+      const proUntilMs = await proUntilFor(email);
+      const level = effectiveLevel(value.level, proUntilMs, now());
+      value = { ...value, level, levelLabel: levelLabel(level), proUntil: isoOrNull(proUntilMs) };
+    }
 
     // The row's own "Last active" value, so recordActivity can leave a cell that already says
     // "just now" alone. A member who just joined has none yet, hence 0.
@@ -1395,11 +1694,12 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
    * so the app can refresh a single row without reloading everything. Null when the row has no
    * email (such a row cannot sign in, so the console has nothing to show).
    */
-  function adminMemberRow(record) {
+  async function adminMemberRow(record) {
     const fields = record?.fields || {};
     const email = firstString(fields, MEMBER_EMAIL_FIELDS);
     if (!email) return null;
-    const level = normaliseLevel(firstString(fields, LEVEL_FIELDS));
+    const proUntilMs = await proUntilFor(email);
+    const level = effectiveLevel(firstString(fields, LEVEL_FIELDS), proUntilMs, now());
     const lastActiveRaw = firstString(fields, [LAST_ACTIVE_FIELD]);
     const lastActiveMs = Date.parse(lastActiveRaw);
     const lastActiveAt = Number.isFinite(lastActiveMs) ? new Date(lastActiveMs).toISOString() : null;
@@ -1419,6 +1719,7 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
       fcmRegisteredAt: firstString(fields, ['FCM registered at']),
       lastActiveAt,
       online: lastActiveAt ? now() - lastActiveMs <= ACTIVE_WINDOW_MS : false,
+      proUntil: isoOrNull(proUntilMs),
       usage: usageSummary(level, readUsage(fields, todayKey(now))),
     };
   }
@@ -1435,7 +1736,7 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
     });
     const rows = [];
     for (const record of members) {
-      const row = adminMemberRow(record);
+      const row = await adminMemberRow(record);
       if (row) rows.push(row);
     }
     return jsonResponse(200, {
@@ -1539,7 +1840,7 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
     const email = firstString(current, MEMBER_EMAIL_FIELDS).toLowerCase();
     if (email) membershipCache.delete(email);
 
-    const row = adminMemberRow({ id: recordId, fields: { ...current, ...fields } });
+    const row = await adminMemberRow({ id: recordId, fields: { ...current, ...fields } });
     return jsonResponse(200, { ok: true, member: row });
   }
 
@@ -1641,6 +1942,203 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
       status: MESSAGE_NEW_STATUS,
       note: 'Your message is stored for the lab administrator. Nothing is shared outside TexLab.',
     });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Method uploads  (app ↔ proxy ↔ Airtable uploads table + an approved Pro trial)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * POST /api/method-uploads stores a title and one file in the uploads table.
+   *
+   * The author is the verified account on the ID token, never anything in the body. The file goes
+   * into an Airtable attachment field through Airtable's content API, so the row itself is all an
+   * administrator needs to review it.
+   */
+  async function submitMethodUpload(request) {
+    const { identity, membership } = await requireMember(request);
+    if (!config.airtableToken) {
+      throw new HttpError(503, 'uploads_unavailable', 'Uploads are not configured on this server yet.');
+    }
+    const payload = await jsonBody(request);
+    const title = String(payload?.title || '').trim().replace(/\s+/g, ' ').slice(0, 150);
+    if (title.length < 3) {
+      throw new HttpError(400, 'invalid_title', 'Give the method or document a title.');
+    }
+    const contentType = String(payload?.contentType || '').trim().toLowerCase() || 'application/pdf';
+    if (!UPLOAD_CONTENT_TYPES.has(contentType)) {
+      throw new HttpError(
+        400,
+        'invalid_file_type',
+        'Upload a PDF, Word document, text file or an image.',
+      );
+    }
+    const file = String(payload?.file || '').replace(/\s+/g, '');
+    if (!file || !/^[A-Za-z0-9+/]+={0,2}$/.test(file)) {
+      throw new HttpError(400, 'invalid_file', 'Choose the method file to upload.');
+    }
+    const padding = file.endsWith('==') ? 2 : file.endsWith('=') ? 1 : 0;
+    const size = Math.floor((file.length * 3) / 4) - padding;
+    if (size > UPLOAD_MAX_BYTES) {
+      throw new HttpError(
+        413,
+        'file_too_large',
+        `Keep the file under ${Math.round(UPLOAD_MAX_BYTES / (1024 * 1024))} MB.`,
+      );
+    }
+    const filename = (String(payload?.filename || '').trim().slice(0, 150) || 'method.pdf')
+      .replace(/[\\/:*?"<>|\r\n\t]/g, '_');
+
+    const fields = {
+      [UPLOAD_FIELDS.title]: title,
+      [UPLOAD_FIELDS.email]: identity.email.toLowerCase(),
+      [UPLOAD_FIELDS.name]: String(membership?.name || identity.name || identity.email).trim(),
+      [UPLOAD_FIELDS.fileName]: filename,
+      [UPLOAD_FIELDS.contentType]: contentType,
+      [UPLOAD_FIELDS.size]: size,
+      [UPLOAD_FIELDS.status]: UPLOAD_NEW_STATUS,
+      [UPLOAD_FIELDS.submittedAt]: new Date(now()).toISOString(),
+    };
+    const created = await airtableWrite({
+      config,
+      table: config.uploadsTable,
+      fields,
+      fetchImpl,
+      throttle: createThrottle(),
+    });
+    const recordId = String(created?.id || '');
+    if (!recordId) {
+      throw new HttpError(502, 'upload_failed', 'The upload was not stored. Try again.');
+    }
+
+    const response = await fetchImpl(
+      `${config.uploadContentApi}/${config.baseId}/${recordId}/` +
+        `${encodeURIComponent(UPLOAD_FIELDS.file)}/uploadAttachment`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${config.airtableToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ contentType, file, filename }),
+      },
+    );
+    if (!response.ok) {
+      // Leave the row with a status an administrator can act on instead of a half-finished upload.
+      try {
+        await airtableWrite({
+          config,
+          table: config.uploadsTable,
+          recordId,
+          fields: { [UPLOAD_FIELDS.status]: 'Upload failed' },
+          fetchImpl,
+          throttle: createThrottle(),
+        });
+      } catch {
+        // Nothing else to do: the clear error below still reaches the member.
+      }
+      throw new HttpError(
+        502,
+        'upload_failed',
+        response.status === 401 || response.status === 403
+          ? 'The method store rejected the upload. Check the Airtable token and the uploads table.'
+          : `The method store could not take that file (HTTP ${response.status}).`,
+      );
+    }
+
+    return jsonResponse(200, {
+      ok: true,
+      id: recordId,
+      status: UPLOAD_NEW_STATUS,
+      note:
+        'Thanks — an administrator reviews each upload and adds 1 to 30 days of Pro to your plan.',
+    });
+  }
+
+  /**
+   * Turns approved uploads into Pro days.
+   *
+   * An administrator reviews the row in Airtable and sets `Status` to `Approved` plus `Days`
+   * (1–30). The next request from that member adds those days to the running trial and marks the
+   * row `Rewarded`, so a row is never paid out twice. Checked at most once every five minutes per
+   * member through KV, and any failure is swallowed: reviewing uploads can never block the library.
+   */
+  async function grantUploadRewards(email) {
+    if (!inviteKv || typeof inviteKv.get !== 'function') return;
+    const checkedKey = `uploads:checked:${String(email).toLowerCase()}`;
+    try {
+      if (await inviteKv.get(checkedKey)) return;
+      await inviteKv.put(checkedKey, '1', { expirationTtl: 300 });
+    } catch {
+      return;
+    }
+
+    let records;
+    try {
+      records = await airtableList({
+        config,
+        table: config.uploadsTable,
+        filterByFormula: `AND(LOWER({${UPLOAD_FIELDS.email}})='${escapeFormulaValue(
+          String(email).toLowerCase(),
+        )}',{${UPLOAD_FIELDS.status}}='Approved')`,
+        maxRecords: 50,
+        fetchImpl,
+        throttle: createThrottle(),
+      });
+    } catch {
+      return;
+    }
+    if (!records.length) return;
+
+    const rewardsKey = `uploads:${String(email).toLowerCase()}`;
+    const state = (await readInviteJson(rewardsKey)) || {};
+    const applied = new Set(Array.isArray(state.applied) ? state.applied : []);
+    let until = Date.parse(String(state.proUntil || '')) || 0;
+    const awarded = [];
+
+    for (const record of records) {
+      const recordId = String(record?.id || '');
+      if (!recordId || applied.has(recordId)) continue;
+      const requested = Math.floor(Number(record?.fields?.[UPLOAD_FIELDS.days]));
+      if (!Number.isFinite(requested) || requested < UPLOAD_TRIAL_MIN_DAYS) continue;
+      const days = Math.min(UPLOAD_TRIAL_MAX_DAYS, requested);
+      until = Math.max(until, now()) + days * 24 * 60 * 60 * 1000;
+      applied.add(recordId);
+      awarded.push({ recordId, days, until });
+    }
+    if (!awarded.length) return;
+
+    await writeInviteJson(rewardsKey, {
+      applied: [...applied],
+      proUntil: new Date(until).toISOString(),
+    });
+    for (const reward of awarded) {
+      try {
+        await airtableWrite({
+          config,
+          table: config.uploadsTable,
+          recordId: reward.recordId,
+          fields: {
+            [UPLOAD_FIELDS.status]: 'Rewarded',
+            [UPLOAD_FIELDS.proUntil]: new Date(reward.until).toISOString(),
+          },
+          fetchImpl,
+          throttle: createThrottle(),
+        });
+      } catch {
+        // The applied id is already stored, so a failed status write cannot pay twice.
+      }
+    }
+
+    // The trial is layered over the stored level through the member's KV record, so it shows in
+    // the invite screen and in effectiveLevel exactly like an invite-earned trial.
+    const member = (await readInviteJson(inviteMemberKey(email))) || {};
+    const memberUntil = Math.max(Date.parse(String(member.proUntil || '')) || 0, until);
+    await writeInviteJson(inviteMemberKey(email), {
+      ...member,
+      proUntil: new Date(memberUntil).toISOString(),
+    });
+    membershipCache.delete(email);
   }
 
   /** One Messages row as the admin console sees it. */
@@ -2278,6 +2776,25 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
     if (url.pathname === '/api/messages') {
       if (method !== 'POST') throw new HttpError(405, 'method_not_allowed', 'Only POST is supported.');
       return submitMessage(request);
+    }
+
+    // Invitation codes: the member's own code, and redeeming someone else's for 7 days of Pro.
+    if (url.pathname === '/api/invite') {
+      if (method !== 'GET' && method !== 'HEAD') {
+        throw new HttpError(405, 'method_not_allowed', 'Only GET and HEAD are supported.');
+      }
+      return inviteStatus(request);
+    }
+
+    if (url.pathname === '/api/invite/redeem') {
+      if (method !== 'POST') throw new HttpError(405, 'method_not_allowed', 'Only POST is supported.');
+      return redeemInvite(request);
+    }
+
+    // A member's method/document upload: stored in the uploads table for an administrator to review.
+    if (url.pathname === '/api/method-uploads') {
+      if (method !== 'POST') throw new HttpError(405, 'method_not_allowed', 'Only POST is supported.');
+      return submitMethodUpload(request);
     }
 
     // The "Ask AI" button: a member's question about one method, answered from that row.

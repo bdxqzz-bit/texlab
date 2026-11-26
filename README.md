@@ -68,7 +68,7 @@ project owner's own Cloudflare account (workers.dev subdomain `bdxqzz`, Workers 
 ```bash
 cd worker
 npm install                              # wrangler (dev tooling only)
-npm test                                 # 40 checks: tokens, levels, join, profile sync, PDF, push
+npm test                                 # 76 checks: tokens, levels, join, profile sync, PDF, push, invites, uploads
 npx wrangler dev                         # local workerd on http://127.0.0.1:8787
 npx wrangler secret put AIRTABLE_TOKEN    # then npx wrangler deploy (your own account)
 ```
@@ -78,6 +78,10 @@ npx wrangler secret put AIRTABLE_TOKEN    # then npx wrangler deploy (your own a
 | `AIRTABLE_TOKEN` | Worker secret | PAT with `data.records:read,data.records:write` and the base added |
 | `AIRTABLE_BASE_ID` | secret, or a var in `wrangler.jsonc` | `appbl0HDJ4cbQES5h` |
 | `AIRTABLE_METHODS_TABLE`, `AIRTABLE_MEMBERS_TABLE`, `MESSAGES_TABLE`, `FIREBASE_PROJECT_ID`, `MEMBERSHIP_CACHE_SECONDS` | vars | same meanings as the Node server below |
+| `INVITES` | KV namespace binding | invitation codes and the Pro trial they earn (`npx wrangler kv namespace create INVITES`); without it `/api/invite` answers `503 invites_unavailable` and every other route is unaffected |
+| `INVITE_TRIAL_DAYS` | var | days of Pro both members get when a code is redeemed, default `7` |
+| `AIRTABLE_UPLOADS_TABLE` | var | Airtable table member method/document uploads land in, default `Method uploads`; needs the columns listed under **Membership badge and method uploads** |
+| `AIRTABLE_CONTENT_API` | var | optional override for Airtable's attachment host, default `https://content.airtable.com/v0` |
 
 `server/index.mjs` keeps the same endpoints, token checks and member gate for local work
 (`node server/index.mjs`, `node server/selftest.mjs`).
@@ -86,6 +90,9 @@ npx wrangler secret put AIRTABLE_TOKEN    # then npx wrangler deploy (your own a
 | --- | --- |
 | `GET /healthz` | Liveness check, no token needed |
 | `GET /api/me` | `{member, level, levelLabel, name, firstName, lastName, photoUrl, role, usage}`; a first-time account joins here as Basic, an inactive row gets `403 not_a_member`, `usage` is today's allowance |
+| `GET /api/invite` | `{code, proUntil, trialDays, invites, redeemed, level, levelLabel}` — the member's own invitation code (created once, then stable) and the end of any invite-earned Pro trial |
+| `POST /api/invite/redeem` | `{code}` — redeems a colleague's code: both members get `INVITE_TRIAL_DAYS` of Pro. Refuses an unknown code (`404`), your own code (`400`) and a second redemption (`409`) |
+| `POST /api/method-uploads` | `{title, filename, contentType, file}` — `file` is base64 (PDF, Word, text or image, up to 5 MB). Stores the row and attaches the file in the uploads table; an admin approving it with `Days` 1–30 adds that Pro trial on the member's next request |
 | `GET /api/methods` | Merged, sorted method list with proxy-relative PDF URLs |
 | `GET /api/files/{table}/{recordId}/{attachmentId}?mode=view\|download\|print` | Streams the PDF and charges one view (default) or one download; `mode=print` charges a download but answers `204` with no body, because the app prints the copy it already opened; over the limit it answers `429 quota_exceeded` with a readable message |
 
@@ -121,6 +128,17 @@ so printing spends a download without fetching the PDF a second time). `/api/me`
 PDF response report the remaining allowance (`usage`, and `X-Quota-*` headers) so the app can
 show it, and an exhausted allowance answers `429 quota_exceeded` naming the limit and the reset
 time. Raise a member's allowance by setting `Level` to `Pro` or `Max` in the Members table.
+
+**Invitation codes.** Every member has one, shown under the home screen's 3-dot menu (**Invite a
+colleague**) with Copy and Share. A member who is new to the app can type a code on the sign-in
+screen before continuing, or later in that dialog; either way `POST /api/invite/redeem` runs after
+sign-in, and both the inviter and the new member get `INVITE_TRIAL_DAYS` (7) days of **Pro**.
+Codes are 8 characters in a `XXXX-XXXX` shape from an alphabet without `0/O/1/I`, are matched
+case- and dash-insensitively, and each member may redeem one code in their lifetime. The trial is
+a level overlay kept in the `INVITES` KV namespace — never written to the Airtable row — so it
+expires on its own and an administrator's `Level` is untouched: while it runs, `/api/me` reports
+`level: "pro"` with the Pro allowance and `proUntil`; afterwards the row's own level applies again.
+Redeeming your own code is refused, and a member already on Pro or Max simply keeps that level.
 
 `AIRTABLE_TOKEN` therefore needs `data.records:read` **and** `data.records:write`. If write is
 missing, sign-in for existing members still works and a new account gets a readable
@@ -176,6 +194,35 @@ verified ID token — no email app is opened and nothing leaves the app's own se
 console lists those rows under **Member messages**, newest first, with the kind, subject, message,
 member and app/device details. The Worker never writes to a row after creating it, so `Status` is
 edited in Airtable as messages are handled.
+
+**Membership badge and method uploads.** The home header shows the member's plan as a level pill;
+tapping it opens **Membership** with today's allowance, an **Upgrade** button and the line *Invite
+to upgrade — share your code and you both get 7 days of Pro*. Both lead to the **Upgrade** screen,
+which holds the invitation code (same code, Copy/Share and redeem field as the corner menu) and the
+method-upload form: a title, a file picker and the line *Upload a textile testing lab related
+method/document to get 1 to 30 days pro plan.*
+
+The upload is sent to `POST /api/method-uploads`, which creates the row with the verified member
+email and attaches the file through Airtable's content API. Create a table named `Method uploads`
+(or set `AIRTABLE_UPLOADS_TABLE`) with these columns:
+
+| Column | Type | Filled by |
+| --- | --- | --- |
+| `Title` | Single line text | the member |
+| `Email`, `Name` | Single line text | the Worker, from the ID token |
+| `File` | Attachment | the Worker (the uploaded document) |
+| `File name`, `Content type` | Single line text | the Worker |
+| `Size` | Number | the Worker, in bytes |
+| `Status` | Single select: `Pending`, `Approved`, `Rejected`, `Rewarded`, `Upload failed` | the Worker writes `Pending`, `Upload failed` and `Rewarded` |
+| `Submitted at` | Date/time (ISO text) | the Worker |
+| `Days` | Number | an administrator, 1–30 when approving |
+| `Pro until` | Single line text | the Worker, the end of the trial it granted |
+
+An administrator reviews a `Pending` row in Airtable and sets `Status` to `Approved` with `Days`
+between 1 and 30 (or `Rejected`). The member's next request adds those days to their Pro trial, marks
+the row `Rewarded` and fills `Pro until`; the trial is a KV overlay like an invite trial, so the
+`Members` row's `Level` stays admin-owned. Days are added once per row, and rows without `Days` are
+left alone.
 
 **Ask AI on a document.** Every method's detail screen has an **Ask AI** button. It opens a chat
 about that method only: the question goes to `POST /api/documents/ask` with the method's record
@@ -319,7 +366,7 @@ APK output: `app/build/outputs/apk/debug/app-debug.apk`.
 ```
 worker/
 ├── index.mjs                    Proxy: Firebase token verification + member gate + Airtable
-├── selftest.mjs                 19-check self-test (throwaway keys, stubbed Airtable)
+├── selftest.mjs                 76-check self-test (throwaway keys, stubbed Airtable)
 ├── wrangler.jsonc               Worker name, compatibility date, non-secret vars
 ├── sites.manifest.json          Deployment manifest for the hosted Worker
 └── .dev.vars.example            Local secrets for `wrangler dev`
