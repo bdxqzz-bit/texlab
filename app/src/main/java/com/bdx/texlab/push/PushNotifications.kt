@@ -9,6 +9,8 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import androidx.core.app.NotificationCompat
+import androidx.core.content.res.ResourcesCompat
+import androidx.core.graphics.drawable.toBitmap
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.bdx.texlab.MainActivity
@@ -25,9 +27,21 @@ object PushPrefs {
 
     private const val FILE = "texlab_push"
     private const val KEY_ENABLED = "enabled"
+    private const val KEY_ASKED = "asked"
 
     fun isEnabled(context: Context): Boolean =
         context.getSharedPreferences(FILE, Context.MODE_PRIVATE).getBoolean(KEY_ENABLED, false)
+
+    /** True once the launch prompt has shown the Android permission dialog at least once. */
+    fun wasAsked(context: Context): Boolean =
+        context.getSharedPreferences(FILE, Context.MODE_PRIVATE).getBoolean(KEY_ASKED, false)
+
+    fun markAsked(context: Context) {
+        context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_ASKED, true)
+            .apply()
+    }
 
     fun setEnabled(context: Context, enabled: Boolean) {
         context.getSharedPreferences(FILE, Context.MODE_PRIVATE)
@@ -53,6 +67,8 @@ object PushNotifications {
             NotificationManager.IMPORTANCE_DEFAULT,
         ).apply {
             description = context.getString(R.string.notification_channel_updates_description)
+            // The launcher icon shows its badge dot while a message is waiting.
+            setShowBadge(true)
         }
         manager.createNotificationChannel(channel)
     }
@@ -84,8 +100,16 @@ object PushNotifications {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
 
+        // The app's own icon, so the card is recognisably TexLab; the status bar keeps the
+        // monochrome icon Android requires.
+        val appIcon = runCatching {
+            ResourcesCompat.getDrawable(context.resources, R.mipmap.ic_launcher, context.theme)
+                ?.toBitmap(width = 144, height = 144)
+        }.getOrNull()
+
         val notification = NotificationCompat.Builder(context, channelId)
             .setSmallIcon(R.drawable.ic_notification)
+            .apply { appIcon?.let { setLargeIcon(it) } }
             .setContentTitle(title.ifBlank { context.getString(R.string.app_name) })
             .setContentText(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))

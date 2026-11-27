@@ -583,6 +583,8 @@ await check('/api/me returns the level and the Google profile', async () => {
     photoUrl: 'https://lh3.googleusercontent.com/a/member',
     role: 'Admin',
     proUntil: null,
+    newAccount: false,
+    trialDays: 7,
     usage: {
       date: new Date().toISOString().slice(0, 10),
       viewsLimit: 50,
@@ -623,6 +625,10 @@ await check('a first-time Google user joins as an active Basic member', async ()
   assert.equal(body.firstName, 'Stranger');
   assert.equal(body.lastName, 'Person');
   assert.equal(body.photoUrl, 'https://lh3.googleusercontent.com/a/stranger');
+  assert.equal(body.newAccount, true, 'a brand-new account is announced once, for the referral prompt');
+  assert.equal(body.trialDays, 7, 'the referral trial length comes from the Worker config');
+  const again = await request('/api/me', token);
+  assert.equal(again.body.newAccount, false, 'a returning member is never asked for a referral code');
 
   const created = writes.find((write) => write.method === 'POST' && write.fields.Email === 'stranger@example.com');
   assert.ok(created, 'the new member must be written to the Members table');

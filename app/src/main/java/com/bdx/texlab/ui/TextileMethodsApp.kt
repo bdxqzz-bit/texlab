@@ -17,6 +17,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.bdx.texlab.push.NotificationHistory
+import com.bdx.texlab.push.NotificationPermissionPrompt
 import com.bdx.texlab.ui.screens.AboutScreen
 import com.bdx.texlab.ui.screens.AdminConsoleScreen
 import com.bdx.texlab.ui.screens.AdminMemberSheet
@@ -28,6 +29,7 @@ import com.bdx.texlab.ui.screens.MembershipDialog
 import com.bdx.texlab.ui.screens.MethodDetailScreen
 import com.bdx.texlab.ui.screens.MethodListScreen
 import com.bdx.texlab.ui.screens.NotificationHistoryScreen
+import com.bdx.texlab.ui.screens.ReferralDialog
 import com.bdx.texlab.ui.screens.ForcedUpdateScreen
 import com.bdx.texlab.ui.screens.SetupScreen
 import com.bdx.texlab.ui.screens.SignInScreen
@@ -58,7 +60,6 @@ fun TexLabApp(viewModel: AppViewModel, activity: Activity) {
         else -> SignInScreen(
             state = state,
             onSignIn = { viewModel.signIn(activity) },
-            onInviteCodeChange = viewModel::setPendingInviteCode,
             onRetryMembership = viewModel::retryMembership,
             onSignOut = viewModel::signOut,
         )
@@ -71,6 +72,9 @@ fun TexLabApp(viewModel: AppViewModel, activity: Activity) {
             onLater = viewModel::dismissUpdate,
         )
     }
+
+    // Asked on the first open and on every later open while Android still blocks notifications.
+    NotificationPermissionPrompt()
 }
 
 /**
@@ -277,6 +281,16 @@ private fun MemberArea(state: AppUiState, viewModel: AppViewModel) {
                 navController.navigate("upgrade")
             },
             onDismiss = viewModel::closeMembership,
+        )
+    }
+
+    // Asked once after the first sign-in; drawn above the nav graph like the other dialogs.
+    if (state.referral.visible) {
+        ReferralDialog(
+            state = state.referral,
+            onCodeChange = viewModel::setReferralCode,
+            onApply = viewModel::redeemReferral,
+            onDismiss = viewModel::dismissReferral,
         )
     }
 

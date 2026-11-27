@@ -1615,6 +1615,9 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
     // first request of a cache window (it never touches an existing level or name).
     if (active) await syncProfile({ config, record: active, identity, fetchImpl });
     const recordId = String(active?.id || '');
+    // A Google account with no Members row at all is joining now: the app offers it the referral
+    // prompt once, and never to a member who was already in the table (even a pending row).
+    const justJoined = !active && records.length === 0;
     let value =
       active
         ? membershipValue(active, identity)
@@ -1641,6 +1644,8 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
       value,
       recordId,
       lastActiveMs: Number.isFinite(storedLastActive) ? storedLastActive : 0,
+      // Read (and cleared) by /api/me, so a brand-new account is announced exactly once.
+      justJoined: justJoined && value.member === true,
     };
     membershipCache.set(email, entry);
     return entry;
@@ -3222,7 +3227,15 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
       const { membership, recordId, activity } = await requireMember(request);
       await recordActivity(activity, ctx);
       const usage = await usageFor(recordId, membership.level);
-      return jsonResponse(200, { ...membership, usage }, { Vary: 'Authorization' });
+      // newAccount tells the app this Google account had no Members row before this request, so
+      // the referral prompt is offered once, right after a first sign-up.
+      const newAccount = Boolean(activity?.justJoined);
+      if (activity) activity.justJoined = false;
+      return jsonResponse(
+        200,
+        { ...membership, newAccount, trialDays: config.inviteTrialDays, usage },
+        { Vary: 'Authorization' },
+      );
     }
 
     if (url.pathname === '/api/notifications/register') {

@@ -103,6 +103,10 @@ sealed interface MembershipResult {
         val quota: UsageQuota? = null,
         /** ISO time the invite-earned Pro trial ends, when one is running. */
         val proUntil: String? = null,
+        /** The proxy had no Members row for this Google account before this request: a new sign-up. */
+        val newAccount: Boolean = false,
+        /** Days of Pro an invitation code earns, as the proxy configures it. */
+        val trialDays: Int = 0,
     ) : MembershipResult
 
     data object NotAMember : MembershipResult

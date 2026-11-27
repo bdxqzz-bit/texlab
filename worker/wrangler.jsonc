@@ -29,11 +29,11 @@
     // In-app updates: what GET /api/app/latest tells installed apps. Publish a new build, then
     // raise APP_VERSION_CODE and set APP_APK_URL to the signed APK's public https URL. Raise
     // APP_MIN_SUPPORTED to the new versionCode to force older installs to update.
-    "APP_VERSION_CODE": "9",
-    "APP_VERSION_NAME": "1.17",
+    "APP_VERSION_CODE": "11",
+    "APP_VERSION_NAME": "1.19",
     "APP_MIN_SUPPORTED": "1",
-    "APP_APK_URL": "https://github.com/bdxqzz-bit/texlab/releases/download/v1.17/app-release.apk",
-    "APP_RELEASE_NOTES": "Your plan now sits in the home header: tap the badge for today's allowance, then upgrade by uploading a textile testing lab method to earn 1 to 30 days of Pro. Invite a colleague from the same screen and you both get 7 days.",
+    "APP_APK_URL": "https://github.com/bdxqzz-bit/texlab/releases/download/v1.19/app-release.apk",
+    "APP_RELEASE_NOTES": "A cleaner sign-in screen with Google sign-in. New members are asked once for a colleague's referral code, and you now see exactly how many days of Pro an invite earns before you share it.",
     // Days of Pro both sides get when an invitation code is redeemed (default 7).
     "INVITE_TRIAL_DAYS": "7"
   }

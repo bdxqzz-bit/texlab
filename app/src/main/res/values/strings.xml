@@ -6,4 +6,10 @@
     <string name="notification_channel_updates">texlab_updates</string>
     <string name="notification_channel_updates_name">Lab updates</string>
     <string name="notification_channel_updates_description">Messages a lab administrator sends from the TexLab console.</string>
+
+    <!-- Asked on launch while the member has not allowed notifications. -->
+    <string name="notification_permission_title">Turn on lab notifications</string>
+    <string name="notification_permission_body">TexLab tells you when your lab administrator publishes a new standard, changes a method or sends you a message. Allow notifications so you do not miss one.</string>
+    <string name="notification_permission_allow">Allow</string>
+    <string name="notification_permission_later">Not now</string>
 </resources>

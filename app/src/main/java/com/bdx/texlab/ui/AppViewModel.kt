@@ -2,6 +2,7 @@ package com.bdx.texlab.ui
 
 import android.app.Activity
 import android.app.Application
+import android.content.Context
 import android.net.Uri
 import android.os.Build
 import android.provider.OpenableColumns
@@ -175,8 +176,21 @@ data class InviteUiState(
     val error: String? = null,
     val codeInput: String = "",
     val redeeming: Boolean = false,
-    /** Shown on the home screen after a code typed at sign-in was redeemed. */
+    /** Shown on the home screen after a code was redeemed. */
     val notice: String? = null,
+)
+
+/**
+ * The one-time referral prompt shown right after a member's first sign-in, so the code field is
+ * not in the way of a returning member on the sign-in screen.
+ */
+data class ReferralUiState(
+    val visible: Boolean = false,
+    val code: String = "",
+    val redeeming: Boolean = false,
+    val error: String? = null,
+    /** Days of Pro a code earns, as the proxy reports it; 0 when it did not say. */
+    val trialDays: Int = 0,
 )
 
 /** The most one method upload may carry; the Worker and Airtable enforce the same limit. */
@@ -241,8 +255,8 @@ data class AppUiState(
     val pushEnabled: Boolean = false,
     val pushBusy: Boolean = false,
     val pushError: String? = null,
-    /** Code typed on the sign-in screen; redeemed once the new account is confirmed as a member. */
-    val pendingInviteCode: String = "",
+    /** The referral prompt shown once after the first sign-in on this device. */
+    val referral: ReferralUiState = ReferralUiState(),
     val invite: InviteUiState = InviteUiState(),
     /** The membership card opened from the home header's level badge. */
     val showMembership: Boolean = false,
@@ -405,7 +419,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             authRepository.signInWithGoogle(activity)
                 .onSuccess { user ->
                     _state.update { it.copy(signingIn = false) }
-                    verifyMembership(user.email.orEmpty(), user.displayName)
+                    verifyMembership(user.email.orEmpty(), user.displayName, justSignedIn = true)
                 }
                 .onFailure { error ->
                     _state.update { it.copy(signingIn = false, authError = error.friendlyAuthMessage()) }
@@ -513,9 +527,74 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     // -------------------------------------------------------------- invitation codes
 
-    /** Keeps the optional code typed at sign-up until the account is verified as a member. */
-    fun setPendingInviteCode(code: String) {
-        _state.update { it.copy(pendingInviteCode = code.uppercase().take(12)) }
+    /** Text in the referral prompt shown after a member's first sign-in. */
+    fun setReferralCode(code: String) {
+        _state.update {
+            it.copy(referral = it.referral.copy(code = code.uppercase().take(12), error = null))
+        }
+    }
+
+    /** "Skip": the prompt is offered once per account on this device and then never again. */
+    fun dismissReferral() {
+        _state.update { it.copy(referral = ReferralUiState()) }
+    }
+
+    /** Applies the code from the first-sign-in prompt and reports a bad one in the same dialog. */
+    fun redeemReferral() {
+        val code = _state.value.referral.code.trim()
+        if (code.isBlank() || _state.value.referral.redeeming) return
+        _state.update { it.copy(referral = it.referral.copy(redeeming = true, error = null)) }
+        viewModelScope.launch {
+            runCatching { proxyClient.redeemInvite(code) }
+                .onSuccess { result ->
+                    val until = result.proUntilLabel ?: "the end of the trial"
+                    val notice = "Referral accepted — you and the member who invited you both " +
+                        "have ${result.trialDays} days of Pro, until $until."
+                    _state.update { state ->
+                        state.copy(
+                            level = result.level,
+                            referral = ReferralUiState(),
+                            invite = state.invite.copy(
+                                codeInput = "",
+                                error = null,
+                                notice = notice,
+                                info = state.invite.info.copy(
+                                    proUntil = result.proUntil,
+                                    redeemed = true,
+                                ),
+                            ),
+                        )
+                    }
+                    // The Pro allowance lives on the row the proxy read before the redemption.
+                    refreshMembership()
+                }
+                .onFailure { error ->
+                    _state.update { state ->
+                        state.copy(
+                            referral = state.referral.copy(
+                                redeeming = false,
+                                error = error.message ?: "The referral code could not be applied.",
+                            ),
+                        )
+                    }
+                }
+        }
+    }
+
+    /**
+     * Shown once, immediately after the proxy has created this member's row: only a brand-new
+     * account is asked. The proxy reports that once, and the per-device flag keeps a repeated
+     * first response from asking twice.
+     */
+    private fun offerReferralOnce(email: String, trialDays: Int) {
+        val prefs = getApplication<Application>()
+            .getSharedPreferences("texlab.signup", Context.MODE_PRIVATE)
+        val key = "referral_prompted_" + email.lowercase()
+        if (prefs.getBoolean(key, false)) return
+        prefs.edit().putBoolean(key, true).apply()
+        _state.update {
+            it.copy(referral = ReferralUiState(visible = true, trialDays = trialDays))
+        }
     }
 
     /** Opens the invite dialog and loads the member's code the first time. */
@@ -664,7 +743,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun redeemInviteFromDialog() {
-        redeemInviteCode(_state.value.invite.codeInput.trim(), fromDialog = true)
+        redeemInviteCode(_state.value.invite.codeInput.trim())
     }
 
     private fun loadInvite() {
@@ -688,11 +767,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /**
-     * Redeems someone else's code. From the dialog a failure is shown there; from sign-in it is
-     * shown as the home screen notice, so a typo is never silent.
-     */
-    private fun redeemInviteCode(code: String, fromDialog: Boolean) {
+    /** Redeems a colleague's code from the menu dialog; a failure is shown in the same dialog. */
+    private fun redeemInviteCode(code: String) {
         val current = _state.value
         if (code.isBlank() || current.invite.redeeming) return
         _state.update { it.copy(invite = it.invite.copy(redeeming = true, error = null)) }
@@ -705,9 +781,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     _state.update { state ->
                         state.copy(
                             level = result.level,
-                            pendingInviteCode = "",
                             invite = state.invite.copy(
-                                open = if (fromDialog) false else state.invite.open,
+                                open = false,
                                 redeeming = false,
                                 codeInput = "",
                                 error = null,
@@ -726,12 +801,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     val message = error.message ?: "The invitation code could not be redeemed."
                     _state.update { state ->
                         state.copy(
-                            pendingInviteCode = if (fromDialog) state.pendingInviteCode else "",
-                            invite = state.invite.copy(
-                                redeeming = false,
-                                error = if (fromDialog) message else null,
-                                notice = if (fromDialog) state.invite.notice else message,
-                            ),
+                            invite = state.invite.copy(redeeming = false, error = message),
                         )
                     }
                 }
@@ -805,7 +875,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun verifyMembership(email: String, displayName: String?) {
+    private fun verifyMembership(email: String, displayName: String?, justSignedIn: Boolean = false) {
         _state.update {
             it.copy(
                 phase = AppUiState.Phase.CheckingMembership,
@@ -835,10 +905,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     loadMethods()
                     syncPushToken()
-                    // A code typed on the sign-in screen is redeemed as soon as the new row exists.
-                    _state.value.pendingInviteCode.trim()
-                        .takeIf { it.isNotEmpty() }
-                        ?.let { code -> redeemInviteCode(code, fromDialog = false) }
+                    if (justSignedIn && result.newAccount) {
+                        offerReferralOnce(email, result.trialDays)
+                    }
                 }
 
                 MembershipResult.NotAMember -> {

@@ -71,6 +71,8 @@ private data class MemberResponse(
     val photoUrl: String? = null,
     val usage: UsageDto? = null,
     val proUntil: String? = null,
+    val newAccount: Boolean = false,
+    val trialDays: Int = 0,
 )
 
 @Serializable
@@ -324,6 +326,8 @@ class ProxyClient(
                             photoUrl = member.photoUrl?.trim()?.takeIf { it.startsWith("http") },
                             quota = member.usage?.toQuota(member.level),
                             proUntil = member.proUntil,
+                            newAccount = member.newAccount,
+                            trialDays = member.trialDays,
                         )
                     }
 
