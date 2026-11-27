@@ -4,12 +4,14 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Check
@@ -43,6 +45,9 @@ import com.bdx.texlab.data.MethodUpload
  *
  * Nothing is written until Approve or Reject is pressed. "Analyse with AI" only asks the proxy to
  * read the document; it already stores what it finds on the uploads row.
+ *
+ * The sheet takes the full height and only the form scrolls, so the Approve and Reject buttons
+ * stay on screen however long the review text is.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -76,221 +81,242 @@ internal fun MethodUploadSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 20.dp)
-                .padding(bottom = 28.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
+                .fillMaxHeight()
+                .padding(horizontal = 20.dp),
         ) {
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(
-                    text = upload.headline,
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Text(
-                    text = buildString {
-                        append(upload.displayName)
-                        if (upload.email.isNotBlank()) append(" · ${upload.email}")
-                        if (upload.dateLabel.isNotBlank()) append(" · ${upload.dateLabel}")
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Text(
-                    text = buildString {
-                        append(upload.statusLabel)
-                        if (upload.fileName.isNotBlank()) append(" · ${upload.fileName}")
-                        if (upload.fileLabel.isNotBlank()) append(" (${upload.fileLabel})")
-                    },
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-
-            if (upload.rewarded) {
-                Surface(
-                    shape = RoundedCornerShape(12.dp),
-                    color = MaterialTheme.colorScheme.primaryContainer,
-                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(
-                        text = "This upload has already added ${upload.days} days of Pro" +
-                            (if (upload.publishedLabel.isNotBlank()) {
-                                " and its method is in ${upload.publishedLabel}."
-                            } else {
-                                "."
-                            }),
+                        text = upload.headline,
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        text = buildString {
+                            append(upload.displayName)
+                            if (upload.email.isNotBlank()) append(" · ${upload.email}")
+                            if (upload.dateLabel.isNotBlank()) append(" · ${upload.dateLabel}")
+                        },
                         style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.padding(12.dp),
-                    )
-                }
-            }
-
-            HorizontalDivider()
-
-            Text(
-                text = "AI review",
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Text(
-                text = if (assistant) {
-                    "Let Gemini read the document and fill in the method name, scope and standard. " +
-                        "The result is stored on the upload row, so Airtable shows the same values."
-                } else {
-                    "AI review is not configured on the server (set the GEMINI_API_KEY secret). " +
-                        "Type the method name and scope yourself."
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            OutlinedButton(
-                onClick = onAnalyse,
-                enabled = assistant && !busy,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                if (analysing) {
-                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                } else {
-                    Icon(
-                        imageVector = Icons.Filled.AutoAwesome,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp),
-                    )
-                }
-                Text(
-                    text = if (analysing) "Reading the document…" else "Analyse with AI",
-                    modifier = Modifier.padding(start = 8.dp),
-                )
-            }
-
-            OutlinedTextField(
-                value = methodName,
-                onValueChange = onMethodNameChange,
-                label = { Text("Method name") },
-                placeholder = { Text("e.g. ISO 105-C06") },
-                singleLine = true,
-                enabled = !busy,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            OutlinedTextField(
-                value = scope,
-                onValueChange = onScopeChange,
-                label = { Text("Scope of method") },
-                placeholder = { Text("What the method covers and which materials it applies to") },
-                minLines = 3,
-                enabled = !busy,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            if (standard.isNotBlank()) {
-                Text(
-                    text = "Standard detected: $standard",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-
-            HorizontalDivider()
-
-            Text(
-                text = "Review",
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Text(
-                text = "Pro days to add",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                Slider(
-                    value = days.toFloat(),
-                    onValueChange = { onDaysChange(it.toInt()) },
-                    valueRange = 1f..30f,
-                    steps = 28,
-                    enabled = !busy,
-                    modifier = Modifier.weight(1f),
-                )
-                Text(
-                    text = "$days d",
-                    style = MaterialTheme.typography.titleSmall,
-                    modifier = Modifier.width(48.dp),
-                )
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "Add the method to the library",
-                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Text(
-                        text = "Copies the file, method name and scope into the chosen table.",
+                        text = buildString {
+                            append(upload.statusLabel)
+                            if (upload.fileName.isNotBlank()) append(" · ${upload.fileName}")
+                            if (upload.fileLabel.isNotBlank()) append(" (${upload.fileLabel})")
+                        },
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                Switch(
-                    checked = publish,
-                    onCheckedChange = onPublishChange,
-                    enabled = !busy,
-                )
-            }
 
-            error?.let { message ->
-                Text(
-                    text = message,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                )
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                TextButton(onClick = onReject, enabled = !busy && !upload.rewarded) {
-                    Text("Reject")
-                }
-                Button(
-                    onClick = onApprove,
-                    enabled = !busy && !upload.rewarded,
-                    modifier = Modifier.weight(1f),
-                ) {
-                    if (reviewing) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(18.dp),
-                            strokeWidth = 2.dp,
-                            color = MaterialTheme.colorScheme.onPrimary,
+                if (upload.rewarded) {
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.primaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(
+                            text = "This upload has already added ${upload.days} days of Pro" +
+                                (if (upload.publishedLabel.isNotBlank()) {
+                                    " and its method is in ${upload.publishedLabel}."
+                                } else {
+                                    "."
+                                }),
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(12.dp),
                         )
+                    }
+                }
+
+                HorizontalDivider()
+
+                Text(
+                    text = "AI review",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    text = if (assistant) {
+                        "Let Gemini read the document and fill in the method name, scope and standard. " +
+                            "The result is stored on the upload row, so Airtable shows the same values."
+                    } else {
+                        "AI review is not configured on the server (set the GEMINI_API_KEY secret). " +
+                            "Type the method name and scope yourself."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedButton(
+                    onClick = onAnalyse,
+                    enabled = assistant && !busy,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    if (analysing) {
+                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
                     } else {
                         Icon(
-                            imageVector = Icons.Filled.Check,
+                            imageVector = Icons.Filled.AutoAwesome,
                             contentDescription = null,
                             modifier = Modifier.size(18.dp),
                         )
                     }
                     Text(
-                        text = when {
-                            reviewing -> "Saving…"
-                            publish -> "Approve & add to library"
-                            else -> "Approve $days days"
-                        },
+                        text = if (analysing) "Reading the document…" else "Analyse with AI",
                         modifier = Modifier.padding(start = 8.dp),
+                    )
+                }
+
+                OutlinedTextField(
+                    value = methodName,
+                    onValueChange = onMethodNameChange,
+                    label = { Text("Method name") },
+                    placeholder = { Text("e.g. ISO 105-C06") },
+                    singleLine = true,
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = scope,
+                    onValueChange = onScopeChange,
+                    label = { Text("Scope of method") },
+                    placeholder = { Text("What the method covers and which materials it applies to") },
+                    minLines = 3,
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                if (standard.isNotBlank()) {
+                    Text(
+                        text = "Standard detected: $standard",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+
+                HorizontalDivider()
+
+                Text(
+                    text = "Review",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    text = "Pro days to add",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Slider(
+                        value = days.toFloat(),
+                        onValueChange = { onDaysChange(it.toInt()) },
+                        valueRange = 1f..30f,
+                        steps = 28,
+                        enabled = !busy,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(
+                        text = "$days d",
+                        style = MaterialTheme.typography.titleSmall,
+                        modifier = Modifier.width(48.dp),
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Add the method to the library",
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                        Text(
+                            text = "Copies the file, method name and scope into the chosen table.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = publish,
+                        onCheckedChange = onPublishChange,
+                        enabled = !busy,
                     )
                 }
             }
 
-            TextButton(onClick = onDismiss, enabled = !busy) { Text("Close") }
+            // Pinned footer: the buttons never scroll away, whatever the form above holds.
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 12.dp)
+                    .padding(bottom = 20.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                HorizontalDivider()
+
+                error?.let { message ->
+                    Text(
+                        text = message,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    TextButton(onClick = onReject, enabled = !busy && !upload.rewarded) {
+                        Text("Reject")
+                    }
+                    Button(
+                        onClick = onApprove,
+                        enabled = !busy && !upload.rewarded,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        if (reviewing) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.onPrimary,
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Filled.Check,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                            )
+                        }
+                        Text(
+                            text = when {
+                                reviewing -> "Saving…"
+                                publish -> "Approve & add to library"
+                                else -> "Approve $days days"
+                            },
+                            modifier = Modifier.padding(start = 8.dp),
+                        )
+                    }
+                }
+
+                TextButton(onClick = onDismiss, enabled = !busy) { Text("Close") }
+            }
         }
     }
 }
