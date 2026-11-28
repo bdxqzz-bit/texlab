@@ -198,6 +198,7 @@ private data class AdminMemberDto(
     val fcmRegisteredAt: String = "",
     val lastActiveAt: String? = null,
     val online: Boolean = false,
+    val proUntil: String? = null,
     val usage: AdminUsageDto? = null,
 )
 
@@ -821,6 +822,7 @@ private fun AdminMemberDto.toAdminMember() = AdminMember(
     registeredAt = fcmRegisteredAt,
     lastActiveAt = lastActiveAt.orEmpty(),
     online = online,
+    proUntil = proUntil.orEmpty(),
     viewsUsed = usage?.viewsUsed ?: 0,
     viewsLimit = usage?.viewsLimit ?: 0,
     downloadsUsed = usage?.downloadsUsed ?: 0,

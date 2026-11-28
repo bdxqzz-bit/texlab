@@ -445,11 +445,20 @@ const PHOTO_FIELDS = ['Photo', 'Photo URL', 'Picture', 'Avatar'];
 const ROLE_FIELDS = ['Role', 'Access'];
 const FCM_FIELDS = ['FCM token', 'Push token', 'Device token'];
 const MEMBER_EMAIL_FIELDS = ['Email', 'Member email', 'User email'];
+// Date a hand-granted Pro runs to. An administrator who gives Pro in the table can also give it an
+// end, so the app counts down instead of reporting an open-ended plan.
+const MEMBER_PRO_UNTIL_FIELDS = ['Pro until', 'Pro Until', 'Pro ends', 'Pro end date', 'Pro expiry'];
 // ISO timestamp of the member's last request, written by the Worker. The console shows a green
 // dot while it is recent and the time otherwise.
 const LAST_ACTIVE_FIELD = 'Last active';
 /** How often one member's cell may be rewritten by this isolate. */
 const LAST_ACTIVE_WRITE_MS = 2 * 60 * 1000;
+
+/** A Members row's own Pro end as epoch ms; 0 when the row leaves it empty or unreadable. */
+function memberProUntilMs(fields = {}) {
+  const ms = Date.parse(firstString(fields, MEMBER_PRO_UNTIL_FIELDS));
+  return Number.isFinite(ms) ? ms : 0;
+}
 /** A member counts as active while their last request is this recent. */
 const ACTIVE_WINDOW_MS = 5 * 60 * 1000;
 
@@ -1629,7 +1638,8 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
     // to the row. Approved uploads are turned into days first, so they count from this response.
     if (value.member) {
       await grantUploadRewards(email);
-      const proUntilMs = await proUntilFor(email);
+      // Whichever runs longer: the earned trial in KV or the end date an admin typed on the row.
+      const proUntilMs = Math.max(await proUntilFor(email), memberProUntilMs(active?.fields));
       const level = effectiveLevel(value.level, proUntilMs, now());
       value = { ...value, level, levelLabel: levelLabel(level), proUntil: isoOrNull(proUntilMs) };
     }
@@ -1742,7 +1752,7 @@ export function createProxy({ env = {}, fetchImpl = fetch, getKey, now = Date.no
     const fields = record?.fields || {};
     const email = firstString(fields, MEMBER_EMAIL_FIELDS);
     if (!email) return null;
-    const proUntilMs = await proUntilFor(email);
+    const proUntilMs = Math.max(await proUntilFor(email), memberProUntilMs(fields));
     const level = effectiveLevel(firstString(fields, LEVEL_FIELDS), proUntilMs, now());
     const lastActiveRaw = firstString(fields, [LAST_ACTIVE_FIELD]);
     const lastActiveMs = Date.parse(lastActiveRaw);

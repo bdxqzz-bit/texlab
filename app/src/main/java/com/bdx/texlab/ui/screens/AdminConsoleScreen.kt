@@ -694,6 +694,16 @@ private fun MemberRow(
                 },
                 maxLines = 1,
             )
+            // Pro is the only level that runs out; the list shows how long is left.
+            member.proUntilSummary?.let { summary ->
+                Text(
+                    text = summary,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
         Icon(
             imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,

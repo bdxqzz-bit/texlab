@@ -241,6 +241,8 @@ data class AppUiState(
     val photoUrl: String? = null,
     /** What the proxy still allows today; replaced with each PDF response. */
     val quota: UsageQuota? = null,
+    /** ISO end of the member's Pro stretch, as the proxy layered it over the stored level. */
+    val proUntil: String? = null,
     val deniedEmail: String? = null,
     val signingIn: Boolean = false,
     val authError: String? = null,
@@ -898,6 +900,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                             lastName = result.lastName.ifBlank { null },
                             photoUrl = result.photoUrl,
                             quota = result.quota,
+                            proUntil = result.proUntil,
                             deniedEmail = null,
                             membershipError = null,
                             pushEnabled = PushPrefs.isEnabled(getApplication()),
@@ -926,6 +929,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                             lastName = null,
                             photoUrl = null,
                             quota = null,
+                            proUntil = null,
                             methods = emptyList(),
                         )
                     }

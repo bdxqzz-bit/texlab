@@ -114,6 +114,40 @@ sealed interface MembershipResult {
 }
 
 /**
+ * How long a Pro membership still runs. The proxy ends a trial or an upload-earned stretch of Pro
+ * at an exact instant; this turns it into the date to show and the whole days left.
+ */
+data class ProTimeLeft(val untilLabel: String, val daysLeft: Int) {
+    /** "6 days left" / "1 day left" / "Ends today" — never negative. */
+    val remainingLabel: String
+        get() = when {
+            daysLeft <= 0 -> "Ends today"
+            daysLeft == 1 -> "1 day left"
+            else -> "$daysLeft days left"
+        }
+}
+
+/** Reads the ISO end of a Pro stretch; null when there is no end date on the row. */
+fun proTimeLeft(iso: String?): ProTimeLeft? {
+    val at = iso?.trim()?.takeIf { it.isNotEmpty() }
+        ?.let { runCatching { Instant.parse(it) }.getOrNull() }
+        ?: return null
+    val hours = Duration.between(Instant.now(), at).toHours()
+    val days = kotlin.math.ceil(hours / 24.0).toInt().coerceAtLeast(0)
+    val untilLabel = dateLabel(at.toString()) ?: return null
+    return ProTimeLeft(untilLabel, days)
+}
+
+/** "3 Dec 2026" for an ISO timestamp, read in the device's zone; null for a missing value. */
+internal fun dateLabel(iso: String?): String? = iso?.let {
+    runCatching { Instant.parse(it) }.getOrNull()?.let { at ->
+        DateTimeFormatter.ofPattern("d MMM yyyy", Locale.getDefault())
+            .withZone(ZoneId.systemDefault())
+            .format(at)
+    }
+}
+
+/**
  * The signed-in member's invitation code and the Pro trial it earns. The proxy creates the code on
  * the first request and never changes it; [proUntil] is the end of a running trial, earned when
  * this member redeemed someone else's code or someone redeemed theirs.
@@ -126,14 +160,7 @@ data class InviteInfo(
     val redeemed: Boolean = false,
 ) {
     /** "3 Dec 2026" for the day the trial ends, or null when no trial is running. */
-    val proUntilLabel: String?
-        get() = proUntil?.let { iso ->
-            runCatching { Instant.parse(iso) }.getOrNull()?.let { at ->
-                DateTimeFormatter.ofPattern("d MMM yyyy", Locale.getDefault())
-                    .withZone(ZoneId.systemDefault())
-                    .format(at)
-            }
-        }
+    val proUntilLabel: String? get() = dateLabel(proUntil)
 }
 
 /**
@@ -210,6 +237,8 @@ data class AdminMember(
     val viewsLimit: Int = 0,
     val downloadsUsed: Int = 0,
     val downloadsLimit: Int = 0,
+    /** ISO end of this member's Pro stretch, when the proxy reports one. */
+    val proUntil: String = "",
 ) {
     val isAdmin: Boolean get() = isAdminRole(role)
     val displayName: String get() = name.takeIf { it.isNotBlank() } ?: email.substringBefore('@')
@@ -229,6 +258,17 @@ data class AdminMember(
             online -> "Active now"
             lastActiveAt.isBlank() -> null
             else -> "Last active ${relativeTime(lastActiveAt)}"
+        }
+
+    /**
+     * For a Pro member only: when that Pro ends and how long is left. Basic and Max have no
+     * time-limited membership, so they get no line at all.
+     */
+    val proUntilSummary: String?
+        get() {
+            if (level != MembershipLevel.PRO) return null
+            val left = proTimeLeft(proUntil) ?: return "No end date"
+            return "${left.untilLabel} \u00b7 ${left.remainingLabel}"
         }
 }
 

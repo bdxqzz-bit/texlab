@@ -29,11 +29,11 @@
     // In-app updates: what GET /api/app/latest tells installed apps. Publish a new build, then
     // raise APP_VERSION_CODE and set APP_APK_URL to the signed APK's public https URL. Raise
     // APP_MIN_SUPPORTED to the new versionCode to force older installs to update.
-    "APP_VERSION_CODE": "13",
-    "APP_VERSION_NAME": "0.1.21",
+    "APP_VERSION_CODE": "14",
+    "APP_VERSION_NAME": "0.1.22",
     "APP_MIN_SUPPORTED": "1",
-    "APP_APK_URL": "https://github.com/bdxqzz-bit/texlab/releases/download/v0.1.21/app-release.apk",
-    "APP_RELEASE_NOTES": "The Share option is gone from the document viewer: Print and Download remain. The admin method-review sheet fits any phone, with Approve, Reject and Close always on screen.",
+    "APP_APK_URL": "https://github.com/bdxqzz-bit/texlab/releases/download/v0.1.22/app-release.apk",
+    "APP_RELEASE_NOTES": "Pro members see how long their Pro still runs, and the admin console shows each Pro's end date, read from the Members row's Pro until column. Basic and Max are unchanged.",
     // Days of Pro both sides get when an invitation code is redeemed (default 7).
     "INVITE_TRIAL_DAYS": "7"
   }

@@ -114,6 +114,8 @@ internal fun AdminMemberSheet(
                 DetailLine(label = "Last name", value = member.lastName)
                 DetailLine(label = "Role", value = member.role)
                 DetailLine(label = "Membership", value = member.levelLabel)
+                // Only Pro ends on a date; an admin needs that date to know when to renew.
+                DetailLine(label = "Pro until", value = member.proUntilSummary)
                 DetailLine(label = "Status", value = member.statusLabel)
                 DetailLine(
                     label = "Device",

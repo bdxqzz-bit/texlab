@@ -2,12 +2,10 @@ package com.bdx.texlab.pdf
 
 import android.content.ContentValues
 import android.content.Context
-import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
-import androidx.core.content.FileProvider
 import com.bdx.texlab.data.FileMode
 import com.bdx.texlab.data.ProxyClient
 import com.bdx.texlab.data.TestMethod
@@ -121,16 +119,5 @@ class PdfStore(
 
     fun clearCache() {
         cacheDir.listFiles()?.forEach { it.delete() }
-    }
-}
-
-/** Share sheet entry for a cached PDF (FileProvider authority is declared in the manifest). */
-fun pdfShareIntent(context: Context, file: File, title: String): Intent {
-    val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
-    return Intent(Intent.ACTION_SEND).apply {
-        type = "application/pdf"
-        putExtra(Intent.EXTRA_STREAM, uri)
-        putExtra(Intent.EXTRA_SUBJECT, title)
-        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
     }
 }

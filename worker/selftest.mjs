@@ -913,6 +913,32 @@ await check('the admin console lists members with their push state', async () =>
   assert.ok(!JSON.stringify(body).includes(DEVICE_TOKEN), 'no device token may appear in the list');
 });
 
+await check('a Pro end typed on the Members row reaches the app and the console', async () => {
+  // An admin who grants Pro by hand puts the end date on the row; without reading it the app
+  // reported an open-ended Pro plan instead of a countdown.
+  const until = new Date(Date.now() + 12 * 24 * 60 * 60 * 1000).toISOString();
+  seedMember('monthly@example.com', {
+    Name: 'Monthly Pro',
+    Status: 'Active',
+    Level: 'Pro',
+    'Pro until': until,
+  });
+  const token = mintToken({ email: 'monthly@example.com' });
+
+  const me = await call('/api/me', { token });
+  assert.equal(me.status, 200);
+  assert.equal(me.body.level, 'pro');
+  assert.ok(
+    me.body.proUntil && Math.abs(Date.parse(me.body.proUntil) - Date.parse(until)) < 1000,
+    `the row's Pro end must reach the app, got ${me.body.proUntil}`,
+  );
+
+  const { body } = await call('/api/admin/members', { token: adminToken });
+  const row = body.members.find((entry) => entry.email === 'monthly@example.com');
+  assert.ok(row, 'the member must be listed');
+  assert.equal(row.proUntil, me.body.proUntil, 'the console must show the same Pro end');
+});
+
 await check('the admin console shows who is active and when the rest were last seen', async () => {
   await request('/api/me', memberToken);
   const stale = new Date(Date.now() - 60 * 60 * 1000).toISOString();

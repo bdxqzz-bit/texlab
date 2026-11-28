@@ -23,7 +23,6 @@ Android app ──Firebase ID token──▶ proxy server ──AIRTABLE_TOKEN�
 | Method library | Proxy returns the merged Airtable method tables, searchable by name/code/standard, filterable by category, refresh from the toolbar |
 | PDF viewing | In-app viewer using the platform `PdfRenderer`, pages rendered lazily while scrolling |
 | PDF download | Streamed through the proxy, cached, exported to `Downloads/TexLab/` (Android 10+) |
-| Sharing | System share sheet through `FileProvider` |
 
 Minimum Android 8.0 (API 26), target/compile SDK 35, Kotlin + Jetpack Compose (Material 3).
 The proxy runs on Cloudflare Workers (`worker/`) and, for local development, as dependency-free
@@ -139,6 +138,13 @@ a level overlay kept in the `INVITES` KV namespace — never written to the Airt
 expires on its own and an administrator's `Level` is untouched: while it runs, `/api/me` reports
 `level: "pro"` with the Pro allowance and `proUntil`; afterwards the row's own level applies again.
 Redeeming your own code is refused, and a member already on Pro or Max simply keeps that level.
+
+**Pro with an end date.** Setting `Level` to `Pro` by hand grants Pro with no time limit. To give
+it one, fill the Members row's `Pro until` column (`Pro Until`, `Pro ends`, `Pro end date` and
+`Pro expiry` are accepted too; an Airtable date or an ISO string both work). The Worker reads it
+alongside any earned trial and reports the later of the two as `proUntil`, so `/api/me` and the
+admin console count down to that date. Pro with an empty column stays open-ended and shows no
+countdown; Basic and Max never show one.
 
 `AIRTABLE_TOKEN` therefore needs `data.records:read` **and** `data.records:write`. If write is
 missing, sign-in for existing members still works and a new account gets a readable

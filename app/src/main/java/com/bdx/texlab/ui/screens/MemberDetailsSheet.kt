@@ -37,6 +37,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import com.bdx.texlab.data.MembershipLevel
+import com.bdx.texlab.data.proTimeLeft
 import com.bdx.texlab.ui.AppUiState
 
 /**
@@ -95,6 +97,12 @@ internal fun MemberDetailsSheet(
             }
 
             HorizontalDivider()
+
+            // Pro is time-limited (invitations and approved uploads add days); Basic and Max are
+            // not, so only a Pro member sees how long the plan still runs.
+            if (state.level == MembershipLevel.PRO) {
+                ProMembershipPanel(left = proTimeLeft(state.proUntil))
+            }
 
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 DetailRow(label = "Email", value = state.userEmail)
