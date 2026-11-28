@@ -1,6 +1,5 @@
 package com.bdx.texlab.ui.screens
 
-import android.content.Intent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,7 +16,6 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Print
-import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
@@ -49,7 +47,6 @@ import androidx.compose.ui.unit.dp
 import com.bdx.texlab.BuildConfig
 import com.bdx.texlab.data.TestMethod
 import com.bdx.texlab.pdf.PdfViewer
-import com.bdx.texlab.pdf.pdfShareIntent
 import com.bdx.texlab.pdf.printPdf
 import kotlinx.coroutines.launch
 import java.io.File
@@ -140,21 +137,6 @@ fun ViewerScreen(
                         enabled = openFile != null && !printing,
                     ) {
                         Icon(Icons.Filled.Print, contentDescription = "Print PDF (counts as a download)")
-                    }
-                    IconButton(
-                        onClick = {
-                            if (openFile != null) {
-                                context.startActivity(
-                                    Intent.createChooser(
-                                        pdfShareIntent(context, openFile, method?.title ?: "Test method"),
-                                        "Share PDF",
-                                    )
-                                )
-                            }
-                        },
-                        enabled = openFile != null,
-                    ) {
-                        Icon(Icons.Filled.Share, contentDescription = "Share PDF")
                     }
                     IconButton(
                         onClick = { method?.let(onDownload) },
